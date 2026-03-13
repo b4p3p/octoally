@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # OpenFlow Installer
-# One command to install and start OpenFlow.
+# Downloads a pre-built release, extracts it, and starts the server.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/openflow/main/scripts/install.sh | bash
+#   OPENFLOW_VERSION=0.1.0 bash install.sh
 #   OPENFLOW_INSTALL_DIR=/opt/openflow bash install.sh
-#   OPENFLOW_REPO_URL="https://TOKEN@github.com/org/repo.git" bash install.sh
+#
+# For private repos / pre-release testing:
+#   OPENFLOW_ARCHIVE_URL="https://example.com/openflow-v0.1.0.tar.gz" bash install.sh
 
 set -euo pipefail
 
 INSTALL_DIR="${OPENFLOW_INSTALL_DIR:-$HOME/openflow}"
-REPO_URL="${OPENFLOW_REPO_URL:-https://github.com/ai-genius-automations/openflow.git}"
-BRANCH="${OPENFLOW_BRANCH:-main}"
+GITHUB_REPO="${OPENFLOW_GITHUB_REPO:-ai-genius-automations/openflow}"
+VERSION="${OPENFLOW_VERSION:-latest}"
 
 # Colors
 RED='\033[0;31m'
@@ -27,7 +30,7 @@ log_warn()  { echo -e "${YELLOW}[OpenFlow]${NC} $1"; }
 log_error() { echo -e "${RED}[OpenFlow]${NC} $1"; }
 log_step()  { echo -e "\n${BOLD}[$1/$TOTAL_STEPS] $2${NC}"; }
 
-TOTAL_STEPS=7
+TOTAL_STEPS=5
 
 # Detect the target user (if running as root via sudo, install for the real user)
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
@@ -42,20 +45,14 @@ else
   TARGET_HOME="$HOME"
 fi
 
-# --- Step 1: Install system prerequisites ------------------------------------
+# --- Step 1: Check prerequisites ---------------------------------------------
 
-log_step 1 "Installing system prerequisites..."
+log_step 1 "Checking prerequisites..."
 
 OS="$(uname -s)"
 
-install_linux_prereqs() {
-  local NEEDED=()
-
-  command -v git &>/dev/null   || NEEDED+=(git)
-  command -v tmux &>/dev/null  || NEEDED+=(tmux)
-  command -v dtach &>/dev/null || NEEDED+=(dtach)
-  dpkg -s build-essential &>/dev/null 2>&1 || NEEDED+=(build-essential)
-
+# Install Node.js if missing (the only system dep we need at runtime)
+install_node_if_needed() {
   local NEED_NODE=false
   if ! command -v node &>/dev/null; then
     NEED_NODE=true
@@ -64,89 +61,68 @@ install_linux_prereqs() {
     NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
     if [ "$NODE_MAJOR" -lt 20 ]; then
       NEED_NODE=true
-      log_warn "Node.js $NODE_MAJOR found, upgrading to 22..."
+      log_warn "Node.js $NODE_MAJOR found, need 20+..."
     fi
   fi
 
-  if [ "$NEED_NODE" = true ]; then
-    log_info "Installing Node.js 22 via NodeSource..."
-    apt-get update -qq
-    apt-get install -y -qq ca-certificates curl gnupg
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list > /dev/null
-    apt-get update -qq
-    apt-get install -y -qq nodejs
-    log_ok "Node.js $(node -v) installed"
-  fi
+  if [ "$NEED_NODE" = false ]; then return 0; fi
 
-  if [ ${#NEEDED[@]} -gt 0 ]; then
-    log_info "Installing: ${NEEDED[*]}..."
-    apt-get update -qq
-    apt-get install -y -qq "${NEEDED[@]}"
-    log_ok "System packages installed"
-  fi
+  case "$OS" in
+    Linux*)
+      log_info "Installing Node.js 22..."
+      apt-get update -qq
+      apt-get install -y -qq ca-certificates curl gnupg
+      mkdir -p /etc/apt/keyrings
+      curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
+      echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+      apt-get update -qq
+      apt-get install -y -qq nodejs
+      ;;
+    Darwin*)
+      if command -v brew &>/dev/null; then
+        log_info "Installing Node.js via Homebrew..."
+        brew install node 2>&1 | tail -1
+      else
+        log_error "Install Node.js 20+ first: https://nodejs.org"
+        exit 1
+      fi
+      ;;
+  esac
 }
 
-install_macos_prereqs() {
-  if ! command -v brew &>/dev/null; then
-    log_error "Homebrew is required on macOS. Install it from https://brew.sh"
-    exit 1
-  fi
-
+# Install tmux + dtach if missing (needed for agent sessions)
+install_runtime_deps() {
   local NEEDED=()
-
-  command -v git &>/dev/null   || NEEDED+=(git)
   command -v tmux &>/dev/null  || NEEDED+=(tmux)
   command -v dtach &>/dev/null || NEEDED+=(dtach)
+  command -v curl &>/dev/null  || NEEDED+=(curl)
 
-  if ! command -v node &>/dev/null; then
-    NEEDED+=(node)
-  else
-    local NODE_MAJOR
-    NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
-    if [ "$NODE_MAJOR" -lt 20 ]; then
-      log_warn "Node.js $NODE_MAJOR found, upgrading..."
-      brew upgrade node 2>&1 | tail -1
-    fi
-  fi
+  if [ ${#NEEDED[@]} -eq 0 ]; then return 0; fi
 
-  if [ ${#NEEDED[@]} -gt 0 ]; then
-    log_info "Installing: ${NEEDED[*]}..."
-    brew install "${NEEDED[@]}" 2>&1 | tail -3
-    log_ok "System packages installed"
-  fi
+  case "$OS" in
+    Linux*)
+      log_info "Installing: ${NEEDED[*]}..."
+      apt-get update -qq
+      apt-get install -y -qq "${NEEDED[@]}"
+      ;;
+    Darwin*)
+      if command -v brew &>/dev/null; then
+        brew install "${NEEDED[@]}" 2>&1 | tail -1
+      fi
+      ;;
+  esac
 }
 
-case "$OS" in
-  Linux*)  install_linux_prereqs ;;
-  Darwin*) install_macos_prereqs ;;
-  *)
-    log_error "Unsupported OS: $OS"
-    exit 1
-    ;;
-esac
+install_node_if_needed
+install_runtime_deps
 
-# Verify system packages
-for cmd in node npm git tmux dtach; do
-  if ! command -v "$cmd" &>/dev/null; then
-    log_error "Failed to install $cmd. Please install it manually and re-run."
-    exit 1
-  fi
-done
-
-NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
-if [ "$NODE_MAJOR" -lt 20 ]; then
-  log_error "Node.js 20+ required (found v$(node -v))"
+# Verify Node
+if ! command -v node &>/dev/null; then
+  log_error "Node.js is required. Install Node.js 20+ and re-run."
   exit 1
 fi
 
-log_ok "All prerequisites met (Node $(node -v), tmux $(tmux -V))"
-
-# --- Step 2: Check Claude Code (prerequisite) --------------------------------
-
-log_step 2 "Checking for Claude Code..."
-
+# Check Claude Code
 if ! command -v claude &>/dev/null; then
   log_error "Claude Code is required but not installed."
   echo ""
@@ -156,56 +132,103 @@ if ! command -v claude &>/dev/null; then
   exit 1
 fi
 
-log_ok "Claude Code $(claude --version 2>/dev/null || echo 'found')"
+log_ok "Prerequisites met (Node $(node -v), Claude Code $(claude --version 2>/dev/null || echo 'ok'))"
 
-# --- Step 3: Clone repository ------------------------------------------------
+# --- Step 2: Download release ------------------------------------------------
 
-log_step 3 "Setting up OpenFlow in $INSTALL_DIR..."
+log_step 2 "Downloading OpenFlow..."
 
-if [ -d "$INSTALL_DIR/.git" ]; then
-  log_info "Existing installation found, pulling latest..."
-  cd "$INSTALL_DIR"
-  git fetch origin
-  git checkout "$BRANCH"
-  git pull origin "$BRANCH"
-else
-  log_info "Cloning OpenFlow..."
-  git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
+ARCHIVE_URL="${OPENFLOW_ARCHIVE_URL:-}"
+
+if [ -z "$ARCHIVE_URL" ]; then
+  # Resolve version from GitHub Releases API
+  if [ "$VERSION" = "latest" ]; then
+    log_info "Fetching latest release from GitHub..."
+    RELEASE_INFO=$(curl -sf "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null || echo "")
+    if [ -z "$RELEASE_INFO" ]; then
+      # No release yet — fall back to latest tag
+      RELEASE_INFO=$(curl -sf "https://api.github.com/repos/$GITHUB_REPO/releases" 2>/dev/null | node -e '
+        let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+          try{const a=JSON.parse(d);if(a[0])console.log(JSON.stringify(a[0]))}catch{}
+        })' 2>/dev/null || echo "")
+    fi
+    if [ -z "$RELEASE_INFO" ]; then
+      log_error "No releases found. Set OPENFLOW_ARCHIVE_URL to install from a direct URL."
+      exit 1
+    fi
+    VERSION=$(echo "$RELEASE_INFO" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).tag_name.replace(/^v/,""))}catch{process.exit(1)}})' 2>/dev/null)
+  fi
+
+  # Look for the tar.gz asset in the release
+  ARCHIVE_URL="https://github.com/$GITHUB_REPO/releases/download/v${VERSION}/openflow-v${VERSION}.tar.gz"
 fi
 
-log_ok "Source ready at $INSTALL_DIR"
+TMPFILE=$(mktemp)
+log_info "Downloading $ARCHIVE_URL..."
+if ! curl -fSL --progress-bar -o "$TMPFILE" "$ARCHIVE_URL" 2>&1; then
+  rm -f "$TMPFILE"
+  log_error "Download failed. Check the URL or version and try again."
+  exit 1
+fi
 
-# --- Step 4: Install dependencies --------------------------------------------
+log_ok "Downloaded ($(du -h "$TMPFILE" | cut -f1))"
 
-log_step 4 "Installing dependencies..."
+# --- Step 3: Extract and install ---------------------------------------------
 
-cd "$INSTALL_DIR/server"
-npm install 2>&1 | tail -1
-log_ok "Server dependencies installed"
+log_step 3 "Installing to $INSTALL_DIR..."
 
-cd "$INSTALL_DIR/dashboard"
-npm install 2>&1 | tail -1
-log_ok "Dashboard dependencies installed"
+# Stop existing server if running
+if [ -f "$INSTALL_DIR/.openflow.pid" ]; then
+  local_pid=$(cat "$INSTALL_DIR/.openflow.pid" 2>/dev/null || echo "")
+  if [ -n "$local_pid" ] && kill -0 "$local_pid" 2>/dev/null; then
+    log_info "Stopping existing server..."
+    kill "$local_pid" 2>/dev/null || true
+    sleep 1
+  fi
+fi
 
-# --- Step 5: Build -----------------------------------------------------------
+# Extract (archive contains openflow-vX.Y.Z/ directory)
+EXTRACT_DIR=$(mktemp -d)
+tar xzf "$TMPFILE" -C "$EXTRACT_DIR"
+rm -f "$TMPFILE"
 
-log_step 5 "Building..."
+# Find the extracted directory
+EXTRACTED=$(ls -d "$EXTRACT_DIR"/openflow-* 2>/dev/null | head -1)
+if [ -z "$EXTRACTED" ] || [ ! -d "$EXTRACTED" ]; then
+  log_error "Archive does not contain expected openflow-vX.Y.Z directory"
+  rm -rf "$EXTRACT_DIR"
+  exit 1
+fi
 
-cd "$INSTALL_DIR/server"
-npm run build 2>&1 | tail -1
-log_ok "Server built"
+# Move into place (preserve logs and config from existing install)
+if [ -d "$INSTALL_DIR" ]; then
+  # Preserve user data
+  for keep in logs .openflow .openflow.pid; do
+    [ -e "$INSTALL_DIR/$keep" ] && cp -r "$INSTALL_DIR/$keep" "$EXTRACT_DIR/_keep_$keep" 2>/dev/null || true
+  done
+  rm -rf "$INSTALL_DIR"
+fi
 
-cd "$INSTALL_DIR/dashboard"
-npm run build 2>&1 | tail -1
-log_ok "Dashboard built"
+mv "$EXTRACTED" "$INSTALL_DIR"
 
-# Prune server devDeps now that build is done
-cd "$INSTALL_DIR/server" && npm prune --production 2>&1 | tail -1
+# Restore preserved data
+for keep in logs .openflow .openflow.pid; do
+  [ -e "$EXTRACT_DIR/_keep_$keep" ] && mv "$EXTRACT_DIR/_keep_$keep" "$INSTALL_DIR/$keep" 2>/dev/null || true
+done
+rm -rf "$EXTRACT_DIR"
 
-# --- Step 6: Install CLI -----------------------------------------------------
+mkdir -p "$INSTALL_DIR/logs"
 
-log_step 6 "Installing CLI..."
+# Read actual version from the installed package
+if [ -f "$INSTALL_DIR/version.json" ]; then
+  VERSION=$(node -e "console.log(require('$INSTALL_DIR/version.json').version)" 2>/dev/null || echo "$VERSION")
+fi
+
+log_ok "Installed to $INSTALL_DIR"
+
+# --- Step 4: Install CLI -----------------------------------------------------
+
+log_step 4 "Installing CLI..."
 
 chmod +x "$INSTALL_DIR/bin/openflow"
 
@@ -216,13 +239,6 @@ if [ ! -w "$LINK_DIR" ]; then
 fi
 
 ln -sf "$INSTALL_DIR/bin/openflow" "$LINK_DIR/openflow"
-log_ok "CLI installed: $LINK_DIR/openflow"
-
-# --- Step 7: Finalize & Start ------------------------------------------------
-
-log_step 7 "Finalizing..."
-
-mkdir -p "$INSTALL_DIR/logs"
 
 # Fix ownership if running as root for another user
 if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
@@ -230,38 +246,38 @@ if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
   chown -R "$TARGET_USER:$TARGET_USER" "$INSTALL_DIR"
 fi
 
-# Stop if already running
-if ("$LINK_DIR/openflow" status 2>/dev/null || true) | grep -q 'running'; then
-  "$LINK_DIR/openflow" stop 2>/dev/null || true
-  sleep 1
-fi
+log_ok "CLI: $LINK_DIR/openflow"
+
+# --- Step 5: Start server ----------------------------------------------------
+
+log_step 5 "Starting OpenFlow..."
 
 # Remove legacy Tauri desktop app if installed
 if command -v dpkg &>/dev/null && dpkg -l open-flow &>/dev/null 2>&1; then
-  log_info "Removing legacy desktop app (Tauri)..."
+  log_info "Removing legacy desktop app..."
   dpkg -r open-flow 2>&1 || true
 fi
 
-# Start the server (as target user if we're root)
-log_info "Starting OpenFlow server..."
+# Start (as target user if we're root)
 if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
   su - "$TARGET_USER" -c "PATH=\"$LINK_DIR:\$PATH\" openflow start"
 else
   "$LINK_DIR/openflow" start
 fi
 
-# --- Summary -----------------------------------------------------------------
+# --- Done --------------------------------------------------------------------
 
 echo ""
-echo -e "${GREEN}${BOLD}OpenFlow installed and running!${NC}"
+echo -e "${GREEN}${BOLD}OpenFlow v${VERSION} installed and running!${NC}"
 echo ""
-echo "  Install dir:  $INSTALL_DIR"
-echo "  CLI:          $LINK_DIR/openflow"
-echo "  Dashboard:    http://localhost:42010"
+echo "  Dashboard:  http://localhost:42010"
+echo "  CLI:        $LINK_DIR/openflow"
+echo "  Install:    $INSTALL_DIR"
 echo ""
 echo "Commands:"
 echo "  openflow status            # Check status"
 echo "  openflow stop              # Stop the server"
 echo "  openflow start             # Start the server"
+echo "  openflow update            # Update to latest release"
 echo "  openflow install-service   # Auto-start on boot"
 echo ""
