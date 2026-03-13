@@ -2,8 +2,7 @@ import { FastifyPluginAsync } from 'fastify';
 import { getDb } from '../db/index.js';
 import { nanoid } from 'nanoid';
 import { readdir, mkdir, readFile, writeFile } from 'fs/promises';
-import { join, resolve, basename, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { join, resolve, basename } from 'path';
 import { homedir } from 'os';
 import { execFile, execFileSync } from 'child_process';
 import { existsSync, mkdirSync, statSync, readFileSync, writeFileSync } from 'fs';
@@ -11,9 +10,10 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-/** Resolve path to ruflo-run.sh from the project root */
-const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const RUFLO_RUN = join(PROJECT_ROOT, 'scripts', 'ruflo-run.sh');
+/** Shared ruflo-run.sh — created by DevCortex installer, shared with OpenFlow.
+ *  Falls back to npx if the script doesn't exist (no DevCortex installed). */
+const RUFLO_RUN = join(homedir(), '.openflow', 'ruflo-run.sh');
+const HAS_RUFLO_RUN = existsSync(RUFLO_RUN);
 
 /**
  * Check if a project already has a valid RuFlo memory database.
@@ -261,8 +261,12 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     }
 
     // Run each step sequentially to avoid parallel npx downloads OOM on low-memory machines
+    // Use shared ruflo-run.sh if available (fast), otherwise fall back to npx
+    const rufloArgs = HAS_RUFLO_RUN
+      ? { cmd: 'bash', args: (sub: string[]) => [RUFLO_RUN, ...sub] }
+      : { cmd: npx, args: (sub: string[]) => ['ruflo@latest', ...sub] };
     try {
-      const result = await execFileAsync('bash', [RUFLO_RUN, 'init', '--force'], opts);
+      const result = await execFileAsync(rufloArgs.cmd, rufloArgs.args(['init', '--force']), opts);
       output.push('[ruflo init] ' + (result.stdout || 'done'));
     } catch (err: any) {
       output.push('[error] ' + (err.message || String(err)));
@@ -271,7 +275,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
     // Initialize hive-mind (sequential — ruflo already cached from init above)
     try {
-      const hmResult = await execFileAsync('bash', [RUFLO_RUN, 'hive-mind', 'init'], opts);
+      const hmResult = await execFileAsync(rufloArgs.cmd, rufloArgs.args(['hive-mind', 'init']), opts);
       output.push('[hive-mind init] ' + (hmResult.stdout || 'done'));
     } catch (err: any) {
       output.push('[hive-mind init] ' + (err.message || 'skipped'));

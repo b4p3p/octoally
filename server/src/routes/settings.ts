@@ -1,15 +1,21 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { join } from 'path';
+import { homedir } from 'os';
+import { existsSync } from 'fs';
 import { getDb } from '../db/index.js';
 
-/** Resolve path to ruflo-run.sh from the project root (3 levels up from this file's dist location) */
-const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const RUFLO_RUN = join(PROJECT_ROOT, 'scripts', 'ruflo-run.sh');
+/**
+ * Shared ruflo-run.sh location: ~/.openflow/ruflo-run.sh
+ * Created/updated by the DevCortex installer. Keeps a local ruflo install
+ * at ~/.openflow/ruflo/ and only downloads when a newer version exists.
+ * Falls back to npx if the script doesn't exist (no DevCortex installed).
+ */
+const RUFLO_RUN = join(homedir(), '.openflow', 'ruflo-run.sh');
+const RUFLO_CMD = existsSync(RUFLO_RUN) ? `bash ${RUFLO_RUN}` : 'npx ruflo@latest';
 
 /** Default values for all settings */
 const DEFAULTS: Record<string, string> = {
-  ruflo_command: `bash ${RUFLO_RUN}`,
+  ruflo_command: RUFLO_CMD,
 };
 
 export function getSetting(key: string): string {
