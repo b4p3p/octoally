@@ -1336,6 +1336,7 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
                   queryClient.invalidateQueries({ queryKey: ['sessions'] }),
                   queryClient.invalidateQueries({ queryKey: ['git-status'] }),
                   queryClient.invalidateQueries({ queryKey: ['ruflo-status'] }),
+                  queryClient.invalidateQueries({ queryKey: ['devcortex-status'] }),
                 ]).finally(() => {
                   setLastRefreshed(new Date());
                   setRefreshing(false);
