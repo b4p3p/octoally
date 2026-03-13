@@ -1216,10 +1216,13 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
   });
 
   const [installingId, setInstallingId] = useState<string | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
   const [rufloConfirm, setRufloConfirm] = useState<{ id: string; conflicts: { settingsJson: boolean; claudeMd: boolean } } | null>(null);
   const installMutation = useMutation({
     mutationFn: (id: string) => api.projects.rufloInstall(id),
-    onMutate: (id) => setInstallingId(id),
+    onMutate: (id) => { setInstallingId(id); setInstallError(null); },
+    onSuccess: () => setInstallError(null),
+    onError: (err: Error) => setInstallError(err.message || 'Install failed'),
     onSettled: () => {
       setInstallingId(null);
       queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
@@ -1473,15 +1476,23 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
                           onClick={() => handleRufloInstall(project.id)}
                           disabled={isInstalling}
                           className="flex items-center gap-1 p-1.5 rounded-lg border text-xs"
-                          style={{ background: '#3b82f615', borderColor: '#3b82f640', color: '#60a5fa' }}
-                          title="Install RuFlo (memory + hive-mind)"
+                          style={{ background: '#3b82f615', borderColor: '#3b82f640', color: isInstalling ? '#facc15' : (installError && installingId === null) ? '#f87171' : '#60a5fa' }}
+                          title={isInstalling ? 'Installing RuFlo...' : 'Install RuFlo (memory + hive-mind)'}
                         >
                           {isInstalling ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Installing...</span>
+                            </>
                           ) : (
                             <Download className="w-3.5 h-3.5" />
                           )}
                         </button>
+                      )}
+                      {installError && installingId === null && !cfStatus?.installed && (
+                        <span className="text-[10px]" style={{ color: '#f87171' }} title={installError}>
+                          Failed - retry?
+                        </span>
                       )}
                       <button
                         onClick={() => api.openFolder(project.path)}

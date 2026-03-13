@@ -238,7 +238,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     if (!project) return reply.status(404).send({ error: 'Project not found' });
 
     const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-    const opts = { cwd: project.path, timeout: 90_000 };
+    const opts = { cwd: project.path, timeout: 180_000 };
     const output: string[] = [];
 
     // Create .bak copies before init overwrites them
