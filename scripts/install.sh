@@ -28,35 +28,120 @@ log_step()  { echo -e "\n${BOLD}[$1/$TOTAL_STEPS] $2${NC}"; }
 
 TOTAL_STEPS=7
 
-# --- Step 1: Check prerequisites ---------------------------------------------
+# --- Step 1: Check for Claude Code (user must install) ------------------------
 
-log_step 1 "Checking prerequisites..."
+log_step 1 "Checking for Claude Code..."
 
-MISSING=""
-
-check_bin() {
-  if ! command -v "$1" &>/dev/null; then
-    MISSING="$MISSING $1"
-  fi
-}
-
-check_bin node
-check_bin npm
-check_bin tmux
-check_bin git
-
-if [ -n "$MISSING" ]; then
-  log_error "Missing required tools:$MISSING"
+if ! command -v claude &>/dev/null; then
+  log_error "Claude Code is required but not installed."
   echo ""
-  echo "Install them with:"
-  case "$(uname -s)" in
-    Linux*)  echo "  sudo apt update && sudo apt install -y nodejs npm tmux git" ;;
-    Darwin*) echo "  brew install node tmux git" ;;
-  esac
+  echo "Install Claude Code first:"
+  echo "  npm install -g @anthropic-ai/claude-code"
+  echo ""
+  echo "Then re-run this installer."
   exit 1
 fi
 
-# Check node version (need 20+)
+log_ok "Claude Code found: $(claude --version 2>/dev/null || echo 'installed')"
+
+# --- Step 2: Install system prerequisites ------------------------------------
+
+log_step 2 "Installing system prerequisites..."
+
+OS="$(uname -s)"
+
+install_linux_prereqs() {
+  local NEEDED=()
+
+  # Check what's missing
+  command -v git &>/dev/null   || NEEDED+=(git)
+  command -v tmux &>/dev/null  || NEEDED+=(tmux)
+  command -v dtach &>/dev/null || NEEDED+=(dtach)
+  dpkg -s build-essential &>/dev/null 2>&1 || NEEDED+=(build-essential)
+
+  # Check Node.js (need 20+)
+  local NEED_NODE=false
+  if ! command -v node &>/dev/null; then
+    NEED_NODE=true
+  else
+    local NODE_MAJOR
+    NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
+    if [ "$NODE_MAJOR" -lt 20 ]; then
+      NEED_NODE=true
+      log_warn "Node.js $NODE_MAJOR found, upgrading to 22..."
+    fi
+  fi
+
+  if [ "$NEED_NODE" = true ]; then
+    log_info "Installing Node.js 22 via NodeSource..."
+    # Install NodeSource GPG key and repo
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq ca-certificates curl gnupg
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq nodejs
+    log_ok "Node.js $(node -v) installed"
+  fi
+
+  if [ ${#NEEDED[@]} -gt 0 ]; then
+    log_info "Installing: ${NEEDED[*]}..."
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq "${NEEDED[@]}"
+    log_ok "System packages installed"
+  fi
+}
+
+install_macos_prereqs() {
+  # Check for Homebrew
+  if ! command -v brew &>/dev/null; then
+    log_error "Homebrew is required on macOS. Install it from https://brew.sh"
+    exit 1
+  fi
+
+  local NEEDED=()
+
+  command -v git &>/dev/null   || NEEDED+=(git)
+  command -v tmux &>/dev/null  || NEEDED+=(tmux)
+  command -v dtach &>/dev/null || NEEDED+=(dtach)
+
+  # Check Node.js (need 20+)
+  if ! command -v node &>/dev/null; then
+    NEEDED+=(node)
+  else
+    local NODE_MAJOR
+    NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
+    if [ "$NODE_MAJOR" -lt 20 ]; then
+      log_warn "Node.js $NODE_MAJOR found, upgrading..."
+      brew upgrade node 2>&1 | tail -1
+    fi
+  fi
+
+  if [ ${#NEEDED[@]} -gt 0 ]; then
+    log_info "Installing: ${NEEDED[*]}..."
+    brew install "${NEEDED[@]}" 2>&1 | tail -3
+    log_ok "System packages installed"
+  fi
+}
+
+case "$OS" in
+  Linux*)  install_linux_prereqs ;;
+  Darwin*) install_macos_prereqs ;;
+  *)
+    log_error "Unsupported OS: $OS"
+    exit 1
+    ;;
+esac
+
+# Verify everything is present
+for cmd in node npm git tmux dtach; do
+  if ! command -v "$cmd" &>/dev/null; then
+    log_error "Failed to install $cmd. Please install it manually and re-run."
+    exit 1
+  fi
+done
+
 NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
 if [ "$NODE_MAJOR" -lt 20 ]; then
   log_error "Node.js 20+ required (found v$(node -v))"
@@ -65,9 +150,9 @@ fi
 
 log_ok "All prerequisites met (Node $(node -v), tmux $(tmux -V))"
 
-# --- Step 2: Clone repository ------------------------------------------------
+# --- Step 3: Clone repository ------------------------------------------------
 
-log_step 2 "Setting up OpenFlow in $INSTALL_DIR..."
+log_step 3 "Setting up OpenFlow in $INSTALL_DIR..."
 
 if [ -d "$INSTALL_DIR/.git" ]; then
   log_info "Existing installation found, pulling latest..."
@@ -83,9 +168,9 @@ fi
 
 log_ok "Source ready at $INSTALL_DIR"
 
-# --- Step 3: Install dependencies --------------------------------------------
+# --- Step 4: Install dependencies --------------------------------------------
 
-log_step 3 "Installing dependencies..."
+log_step 4 "Installing dependencies..."
 
 cd "$INSTALL_DIR/server"
 npm install 2>&1 | tail -1
@@ -95,24 +180,24 @@ cd "$INSTALL_DIR/dashboard"
 npm install 2>&1 | tail -1
 log_ok "Dashboard dependencies installed"
 
-# --- Step 4: Build -----------------------------------------------------------
+# --- Step 5: Build -----------------------------------------------------------
 
-log_step 4 "Building..."
+log_step 5 "Building..."
 
-cd "$INSTALL_DIR"
-
-cd server && npm run build 2>&1 | tail -1
+cd "$INSTALL_DIR/server"
+npm run build 2>&1 | tail -1
 log_ok "Server built"
 
-cd ../dashboard && npm run build 2>&1 | tail -1
+cd "$INSTALL_DIR/dashboard"
+npm run build 2>&1 | tail -1
 log_ok "Dashboard built"
 
 # Prune server devDeps now that build is done
 cd "$INSTALL_DIR/server" && npm prune --production 2>&1 | tail -1
 
-# --- Step 5: Install CLI -----------------------------------------------------
+# --- Step 6: Install CLI -----------------------------------------------------
 
-log_step 5 "Installing CLI..."
+log_step 6 "Installing CLI..."
 
 chmod +x "$INSTALL_DIR/bin/openflow"
 
@@ -126,9 +211,9 @@ fi
 ln -sf "$INSTALL_DIR/bin/openflow" "$LINK_DIR/openflow"
 log_ok "CLI installed: $LINK_DIR/openflow"
 
-# --- Step 6: Finalize --------------------------------------------------------
+# --- Step 7: Finalize --------------------------------------------------------
 
-log_step 6 "Finalizing..."
+log_step 7 "Finalizing..."
 
 mkdir -p "$INSTALL_DIR/logs"
 
@@ -141,19 +226,12 @@ if ("$LINK_DIR/openflow" status 2>/dev/null || true) | grep -q 'running'; then
   log_ok "Server restarted"
 fi
 
-# --- Step 7: Optional desktop app --------------------------------------------
-
-log_step 7 "Checking for desktop app..."
-
 # Remove legacy Tauri desktop app if installed
-if dpkg -l open-flow &>/dev/null; then
+if command -v dpkg &>/dev/null && dpkg -l open-flow &>/dev/null 2>&1; then
   log_info "Removing legacy desktop app (Tauri)..."
   sudo dpkg -r open-flow 2>&1 || true
   log_ok "Legacy desktop app removed"
 fi
-
-log_info "Desktop app can be built from $INSTALL_DIR/desktop-electron/"
-log_info "Or download a release from the GitHub releases page."
 
 # --- Summary -----------------------------------------------------------------
 
