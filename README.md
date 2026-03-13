@@ -4,7 +4,8 @@
     <strong>AI Coding Session Orchestration Dashboard</strong>
   </p>
   <p align="center">
-    Launch, monitor, and manage Claude Code sessions from a beautiful web UI.
+    The dashboard for Claude Code. Launch, monitor, and manage AI coding sessions<br>
+    with <a href="https://github.com/ruvnet/ruflo">RuFlo</a> multi-agent orchestration — all from one place.
   </p>
 </p>
 
@@ -17,17 +18,17 @@
 
 ---
 
-> **OpenFlow** is a local-first orchestration dashboard for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run multi-agent hive-mind sessions, single-agent workflows, and interactive terminals — all from one place with real-time streaming.
+> **OpenFlow** is a local-first orchestration dashboard for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [RuFlo](https://github.com/ruvnet/ruflo). Run multi-agent hive-mind sessions, single-agent workflows, and interactive terminals — all from a beautiful web UI with real-time streaming.
 
 ---
 
 ## ✨ Features
 
-- 🐝 **Hive-Mind Sessions** — Launch multi-agent Claude Code orchestration via [ruflo](https://www.npmjs.com/package/claude-flow)
+- 🐝 **Hive-Mind Sessions** — Launch multi-agent Claude Code orchestration via [RuFlo](https://github.com/ruvnet/ruflo)
 - 🤖 **Agent Sessions** — Run single-agent sessions with custom agent definitions (`.claude/agents/*.md`)
 - 💻 **Terminal Sessions** — Interactive terminals managed through the dashboard
 - 📡 **Real-Time Streaming** — WebSocket-powered live output, tool calls, and progress tracking
-- 📁 **Project Management** — Multi-project support with per-project settings and agent configurations
+- 📁 **Project Management** — Multi-project support with per-project RuFlo initialization and agent configurations
 - 📋 **Task Queue** — Organize and queue work items for your coding sessions
 - 🎙️ **Speech-to-Text** — Voice commands via local Whisper or cloud APIs (desktop app)
 - 🖥️ **Desktop App** — Electron system tray app with native STT and auto-launch
@@ -37,55 +38,75 @@
 
 ## 📦 Quick Install
 
-### One-Line Install (Recommended)
+### Prerequisites
+
+| Requirement | Why | Install |
+|-------------|-----|---------|
+| **Node.js 20+** | Runtime for the server | [nodejs.org](https://nodejs.org) |
+| **Claude Code** | AI coding agent | `npm install -g @anthropic-ai/claude-code` |
+
+> **Important:** Before installing OpenFlow, you must run Claude Code at least once to accept terms and enable non-interactive mode:
+> ```bash
+> claude                              # Accept terms & sign in
+> claude --dangerously-skip-permissions  # Enable non-interactive agent sessions
+> ```
+
+### One-Line Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/openflow/main/scripts/install.sh | bash
 ```
 
-This will:
-1. Check prerequisites (Node.js 20+, tmux, git)
-2. Clone the repo to `~/openflow`
-3. Install dependencies and build
-4. Add the `openflow` CLI to your PATH
-
-Then start it:
-
-```bash
-openflow start        # Start the server
-openflow status       # Check status
-```
+The installer will:
+1. Check for Node.js and Claude Code (offer to install if missing)
+2. Verify Claude Code has been initialized
+3. Download and extract the pre-built release
+4. Install the `openflow` CLI
+5. Start the server
+6. Optionally install the desktop app
 
 > 💡 **Custom install location:** `OPENFLOW_INSTALL_DIR=/opt/openflow bash install.sh`
+
+### What you get
+
+- **Web Dashboard:** http://localhost:42010
+- **CLI:** `openflow start | stop | restart | status | update | logs`
+- **Desktop App:** Optional Electron app with system tray and speech-to-text
 
 ### Manual Install (Development)
 
 ```bash
 git clone https://github.com/ai-genius-automations/openflow.git
 cd openflow
-npm run install:all
-npm run dev
+
+# Server
+cd server && npm install && npm run build && cd ..
+
+# Dashboard
+cd dashboard && npm install && npm run build && cd ..
+
+# Start
+cd server && npm start
 ```
 
-- **Dashboard:** http://localhost:5173
-- **API Server:** http://localhost:42010
+- **Dashboard:** http://localhost:42010
+- **Dev mode (with hot reload):** `cd server && npm run dev` + `cd dashboard && npm run dev`
 
 ---
 
-## 🛠️ Prerequisites
+## 🛠️ How It Works
 
-| Requirement | Version | Install |
-|-------------|---------|---------|
-| **Node.js** | 20+ | [nodejs.org](https://nodejs.org) |
-| **tmux** | any | `sudo apt install tmux` / `brew install tmux` |
-| **Claude Code** | latest | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
-| **dtach** *(optional)* | any | `sudo apt install dtach` — persists sessions across restarts |
+OpenFlow is a dashboard that sits on top of **Claude Code** and **RuFlo**:
+
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** is Anthropic's CLI agent for coding tasks
+- **[RuFlo](https://github.com/ruvnet/ruflo)** adds multi-agent orchestration, hive-mind coordination, and memory to Claude Code
+- **OpenFlow** provides the UI to manage projects, launch sessions, and monitor everything in real-time
+
+When you add a project and enable RuFlo, OpenFlow automatically initializes the project with agent definitions, hive-mind support, and the configuration files Claude Code needs. You then launch sessions directly from the dashboard.
 
 ---
 
 ## 🖥️ CLI Commands
-
-Once installed, the `openflow` command manages the server:
 
 ```bash
 openflow start              # Start the server (background)
@@ -111,8 +132,11 @@ openflow uninstall-service  # Remove the system service
 │   Zustand            │                    │    PTY Worker           │
 └──────────────────────┘                    │    ├── tmux sessions    │
                                             │    ├── Claude Code      │
-                                            │    └── Terminal shells  │
-                                            └─────────────────────────┘
+┌──────────────────────┐                    │    ├── RuFlo agents     │
+│   Desktop (Electron) │                    │    └── Terminal shells  │
+│   System tray        │ ◄────────────────► │                         │
+│   Speech-to-text     │                    └─────────────────────────┘
+└──────────────────────┘
 ```
 
 | Layer | Stack |
@@ -120,7 +144,7 @@ openflow uninstall-service  # Remove the system service
 | **Frontend** | React 19, Vite, Tailwind CSS 4, TanStack Query, Zustand, xterm.js |
 | **Backend** | Fastify, TypeScript, SQLite (better-sqlite3), node-pty, WebSocket |
 | **Desktop** | Electron, system tray, local Whisper STT, AES-256-GCM config encryption |
-| **Sessions** | tmux for persistence, dtach for detach/reattach, Claude Code CLI |
+| **Sessions** | tmux for persistence, dtach for detach/reattach, Claude Code + RuFlo |
 
 ---
 
@@ -140,10 +164,8 @@ openflow/
 ├── desktop-electron/    # Electron desktop app
 │   └── src/
 │       └── speech/      # Whisper STT integration
-├── desktop/             # Tauri desktop app (alternative)
 ├── bin/                 # CLI launcher
-├── scripts/             # Install, update, and service scripts
-└── .env.example         # Environment variable reference
+└── scripts/             # Install, build-release, update, and service scripts
 ```
 
 ---
@@ -175,12 +197,7 @@ The Electron desktop app adds:
 - Local speech-to-text via Whisper (no cloud needed)
 - Cloud STT via OpenAI Whisper API or Groq (API keys encrypted at rest)
 
-```bash
-cd desktop-electron
-npm install
-npm run build
-npm start
-```
+The desktop app is offered during installation, or can be downloaded from [GitHub Releases](https://github.com/ai-genius-automations/openflow/releases).
 
 ---
 
