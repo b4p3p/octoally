@@ -191,14 +191,18 @@ function ProjectForm({
     onSuccess: async (data) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
-      // Trigger ruflo install in background if toggled on
       if (installRuflo && data.project?.id) {
-        const projectId = data.project.id;
-        api.projects.rufloInstall(projectId).then(() => {
-          queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
-        }).catch(() => {
-          queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
-        });
+        // Keep dialog open, show installing status
+        setRufloSetupStatus('installing');
+        try {
+          await api.projects.rufloInstall(data.project.id);
+          setRufloSetupStatus('done');
+        } catch {
+          setRufloSetupStatus('error');
+        }
+        queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
+        // Brief pause so user sees "done" state
+        await new Promise(r => setTimeout(r, 800));
       }
       onSubmit();
       if (data.project?.id) {
@@ -240,8 +244,6 @@ function ProjectForm({
     onError: (err: Error) => setError(err.message),
   });
 
-  const isPending = createMutation.isPending || updateMutation.isPending;
-
   const handleSave = async () => {
     setError('');
     if (mode === 'edit') { updateMutation.mutate(); return; }
@@ -275,6 +277,9 @@ function ProjectForm({
   const [installRuflo, setInstallRuflo] = useState(true);
   const [rufloConflicts, setRufloConflicts] = useState<{ settingsJson: boolean; claudeMd: boolean } | null>(null);
   const [rufloConfirmPending, setRufloConfirmPending] = useState(false);
+  const [rufloSetupStatus, setRufloSetupStatus] = useState<'idle' | 'installing' | 'done' | 'error'>('idle');
+
+  const isPending = createMutation.isPending || updateMutation.isPending || rufloSetupStatus === 'installing';
 
   const [createRepo, setCreateRepo] = useState(false);
   const [repoName, setRepoName] = useState('');
@@ -738,7 +743,7 @@ function ProjectForm({
                 style={{ background: 'var(--accent)', color: 'white' }}
               >
                 <Save className="w-4 h-4" />
-                {isPending ? 'Saving...' : mode === 'add' ? 'Add Project' : 'Save Changes'}
+                {rufloSetupStatus === 'installing' ? 'Installing RuFlo...' : rufloSetupStatus === 'done' ? 'Done!' : isPending ? 'Saving...' : mode === 'add' ? 'Add Project' : 'Save Changes'}
               </button>
               <button
                 onClick={onCancel}
