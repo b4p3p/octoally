@@ -16,6 +16,10 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const webviewRef = useRef<HTMLElement>(null);
   const inputFocusedRef = useRef(false);
+  // Initial URL — set once on the webview src attribute, never mutated by React.
+  // All subsequent navigation happens inside the webview via its own links or loadURL().
+  // Mutating src triggers GUEST_VIEW_MANAGER which crashes on rapid navigation.
+  const [initialUrl] = useState(url);
 
   // For iframe fallback: manual history tracking
   const [history, setHistory] = useState<string[]>([url]);
@@ -72,9 +76,10 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
       updateNavState();
     }
     function onNavFailed(event: any) {
-      // errorCode -3 = ABORTED — happens during rapid navigation, not a real failure
+      // errorCode -3 = ABORTED — happens during rapid navigation, not a real failure.
+      // The last navigation will still complete; just ignore the abort.
       const code = event?.errorCode ?? event?.detail?.errorCode;
-      if (code === -3) return; // ignore aborted loads from rapid clicking
+      if (code === -3) return;
       setLoading(false);
       updateNavState();
     }
@@ -94,8 +99,7 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
       setCrashed(false);
     }
 
-    // Watchdog: if loading takes longer than 8s (likely stuck from rapid clicks),
-    // auto-reload the webview to recover from blank page
+    // Watchdog: if loading takes longer than 10s (likely stuck), auto-reload
     let loadTimer: ReturnType<typeof setTimeout> | null = null;
     function onNavStartWithWatchdog() {
       onNavStart();
@@ -107,7 +111,7 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
             wv.reload?.();
           }
         } catch {}
-      }, 8000);
+      }, 10000);
     }
     function onNavDoneWithWatchdog() {
       if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
@@ -146,6 +150,7 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
     setLoading(true);
 
     if (isElectron && webviewRef.current) {
+      // Use loadURL() — never mutate the src attribute (causes GUEST_VIEW_MANAGER crash)
       (webviewRef.current as any).loadURL?.(normalized);
     } else {
       setHistory((prev) => {
@@ -159,7 +164,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
 
   function goBack() {
     if (isElectron && webviewRef.current) {
-      // Always try — webview.goBack() is non-blocking and safe to call
       try { (webviewRef.current as any).goBack?.(); } catch {}
     } else {
       if (historyIndex <= 0) return;
@@ -190,7 +194,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
     if (isElectron && webviewRef.current) {
       try { (webviewRef.current as any).stop?.(); } catch {}
     }
-    // For iframe there's no clean stop — just mark as not loading
     setLoading(false);
   }
 
@@ -210,7 +213,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     navigate(inputUrl);
-    // Blur the input after navigating so URL updates show
     (e.target as HTMLFormElement).querySelector('input')?.blur();
   }
 
@@ -225,8 +227,7 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
     }
   }
 
-  // Keep mounted but hidden — unmounting destroys the webview renderer process,
-  // causing blank pages and full reloads when switching back.
+  // Keep mounted but hidden — unmounting destroys the webview renderer process
   return (
     <div className="h-full flex flex-col" style={{ display: visible ? 'flex' : 'none' }}>
       {/* Browser toolbar */}
@@ -237,7 +238,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
           background: 'var(--bg-secondary)',
         }}
       >
-        {/* Navigation buttons */}
         <button
           onClick={goBack}
           disabled={!canGoBack && !loading}
@@ -257,7 +257,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
           <ArrowRight className="w-4 h-4" />
         </button>
 
-        {/* Stop / Refresh toggle */}
         {loading ? (
           <button
             onClick={stop}
@@ -278,7 +277,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
           </button>
         )}
 
-        {/* URL bar */}
         <form onSubmit={handleSubmit} className="flex-1 min-w-0">
           <input
             type="text"
@@ -290,11 +288,9 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
             }}
             onBlur={() => {
               inputFocusedRef.current = false;
-              // Sync back to current URL if user didn't submit
               setInputUrl(currentUrl);
             }}
             onKeyDown={(e) => {
-              // Escape: cancel editing, restore current URL
               if (e.key === 'Escape') {
                 setInputUrl(currentUrl);
                 e.currentTarget.blur();
@@ -312,7 +308,6 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
           />
         </form>
 
-        {/* Open in external browser */}
         <button
           onClick={openExternal}
           className="flex items-center justify-center rounded transition-colors hover:bg-[var(--bg-tertiary)]"
@@ -342,17 +337,19 @@ export function WebPageView({ url, visible = true, onUrlChange }: WebPageViewPro
           </div>
         )}
         {isElectron ? (
-          // Electron: use <webview> for full browser capabilities (OAuth, cookies, etc.)
-          // Dark background prevents white flash during SPA page transitions
+          // Electron webview: src is set ONCE on mount via initialUrl.
+          // Never let React mutate src — it triggers GUEST_VIEW_MANAGER IPC
+          // which causes ERR_ABORTED (-3) and blank pages on rapid navigation.
+          // All navigation after mount happens via the SPA's own links inside
+          // the webview, or via webview.loadURL() from the URL bar.
           <webview
             ref={webviewRef as any}
-            src={currentUrl}
+            src={initialUrl}
             // @ts-ignore — Electron webview attributes not in React types
             partition="persist:webpages"
             style={{ width: '100%', height: '100%', background: '#0f1117' }}
           />
         ) : (
-          // Browser fallback: iframe (limited — OAuth/X-Frame-Options may block some sites)
           <iframe
             ref={iframeRef}
             src={currentUrl}
