@@ -218,22 +218,25 @@ export async function initSpeechListeners() {
   await listen<TranscriptionPayload>('stt://transcription', (payload) => {
     const store = useSpeechStore.getState();
 
-    // In dictation mode, check for stop commands
+    // In dictation mode, check for stop commands.
+    // ONLY match if the utterance IS the command (exact match or starts with it).
+    // Do NOT match if command words appear inside a longer natural sentence.
     if (store.dictationMode) {
       const normalized = payload.text.toLowerCase().replace(/[^\w\s]/g, '').trim();
+      const words = normalized.split(/\s+/);
 
-      // "stop send" / "stop enter" (standalone or longer phrases) — stop + press Enter
-      const stopEnterPhrases = ['stop transcribe enter', 'stop transcribing enter', 'stop dictation enter', 'end dictation enter', 'stop transcribe send', 'stop transcribing send', 'stop dictation send', 'end dictation send'];
-      if (normalized === 'stop send' || normalized === 'stop enter' || stopEnterPhrases.some((p) => normalized.includes(p))) {
+      // "stop send" / "stop enter" (standalone phrases only — max 4 words)
+      const stopEnterPhrases = ['stop transcribe enter', 'stop transcribing enter', 'stop dictation enter', 'end dictation enter', 'stop transcribe send', 'stop transcribing send', 'stop dictation send', 'end dictation send', 'stop send', 'stop enter'];
+      if (words.length <= 4 && stopEnterPhrases.some((p) => normalized === p)) {
         console.log('[STT] Stop dictation + enter detected');
         stopDictation();
         setTimeout(() => simulateEnterKey(), 100);
         return;
       }
 
-      // "stop" standalone — just stop dictation
-      const stopPhrases = ['stop transcribe', 'stop transcribing', 'stop dictation', 'end dictation'];
-      if (normalized === 'stop' || stopPhrases.some((p) => normalized.includes(p))) {
+      // "stop" standalone or "stop transcribe" etc. — must be the whole utterance (max 3 words)
+      const stopPhrases = ['stop', 'stop transcribe', 'stop transcribing', 'stop dictation', 'end dictation'];
+      if (words.length <= 3 && stopPhrases.some((p) => normalized === p)) {
         console.log('[STT] Stop dictation detected');
         stopDictation();
         return;

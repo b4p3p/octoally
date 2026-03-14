@@ -202,7 +202,11 @@ const BUILTIN_COMMANDS: VoiceCommand[] = [
   {
     id: 'delete-words',
     name: 'Delete Words',
-    triggerPhrases: ['delete', 'remove'],
+    // Trigger phrases for regex fallback. The number goes in the param.
+    // GPT-5 mini handles flexible phrasing like "delete 3 words" / "clear three words".
+    // Regex only matches prefix, so "delete words" matches "delete words" with no param,
+    // and the App.tsx handler defaults to 1 word.
+    triggerPhrases: ['delete words', 'remove words', 'delete word', 'remove word', 'clear words', 'clear word'],
     action: { kind: 'delete-words' },
     type: 'builtin',
     enabled: true,
@@ -344,25 +348,26 @@ function phraseMatches(input: string, trigger: string): { matches: boolean; rema
   const inputWords = input.split(/\s+/);
   const triggerWords = trigger.split(/\s+/);
 
-  // Direct prefix match
+  // Direct prefix match — trigger must be at the START of the utterance
   if (input.startsWith(trigger)) {
     const remainder = input.slice(trigger.length).trim();
     return { matches: true, remainder };
   }
 
-  // Word-sequence match (allowing the trigger words to appear in order)
-  let ti = 0;
-  let lastMatchIdx = -1;
-  for (let i = 0; i < inputWords.length && ti < triggerWords.length; i++) {
-    if (inputWords[i] === triggerWords[ti]) {
-      ti++;
-      lastMatchIdx = i;
+  // Word-level prefix match — trigger words must appear at the BEGINNING in order
+  // (no longer matches trigger words scattered anywhere in the sentence)
+  if (inputWords.length >= triggerWords.length) {
+    let prefixMatch = true;
+    for (let i = 0; i < triggerWords.length; i++) {
+      if (inputWords[i] !== triggerWords[i]) {
+        prefixMatch = false;
+        break;
+      }
     }
-  }
-
-  if (ti === triggerWords.length) {
-    const remainder = inputWords.slice(lastMatchIdx + 1).join(' ').trim();
-    return { matches: true, remainder };
+    if (prefixMatch) {
+      const remainder = inputWords.slice(triggerWords.length).join(' ').trim();
+      return { matches: true, remainder };
+    }
   }
 
   // Try with joined words (e.g. "openproject" contains "open project")
@@ -378,10 +383,26 @@ function phraseMatches(input: string, trigger: string): { matches: boolean; rema
 /**
  * Match transcribed text against all enabled commands.
  * Returns the best match (longest trigger phrase wins).
+ *
+ * Single-word triggers (e.g. "stop", "start", "send") only match short utterances
+ * (trigger + at most 2 extra words for a param like "delete three words").
+ * This prevents natural speech like "go ahead and stop the server" from triggering
+ * the "stop" command.
  */
 export function matchCommand(text: string): CommandMatch | null {
   const normalized = normalize(text);
   const expanded = expandNumberWords(normalized);
+  const wordCount = normalized.split(/\s+/).length;
+
+  // Special case: "delete/remove/clear N words" where N is between the verb and "words"
+  // e.g. "delete three words", "remove 5 words", "clear two words"
+  const deleteWordsMatch = expanded.match(/^(delete|remove|clear)\s+(\d+)\s+words?$/);
+  if (deleteWordsMatch) {
+    const deleteCmd = getAllCommands().find((c) => c.id === 'delete-words' && c.enabled);
+    if (deleteCmd) {
+      return { command: deleteCmd, param: deleteWordsMatch[2], rawText: text };
+    }
+  }
 
   let bestMatch: CommandMatch | null = null;
   let bestTriggerLen = 0;
@@ -392,6 +413,15 @@ export function matchCommand(text: string): CommandMatch | null {
     for (const trigger of cmd.triggerPhrases) {
       const normTrigger = normalize(trigger);
       if (normTrigger.length <= bestTriggerLen) continue; // only try longer triggers
+
+      const triggerWordCount = normTrigger.split(/\s+/).length;
+
+      // Single-word triggers must be standalone or have at most 2 param words
+      // e.g. "stop" matches "stop", "stop transcribe", but NOT "go ahead and stop"
+      if (triggerWordCount === 1 && wordCount > triggerWordCount + 2) continue;
+
+      // Two-word triggers allow up to 3 param words (e.g. "open project my cool app")
+      if (triggerWordCount === 2 && wordCount > triggerWordCount + 3) continue;
 
       // Try both original and number-expanded versions
       for (const input of [normalized, expanded]) {

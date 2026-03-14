@@ -78,6 +78,15 @@ User: "stop listening" → {"commandId": "stop-listening", "param": ""}
 
 IMPORTANT: "open project <name>" is ALWAYS navigate-project, NOT navigate-home. navigate-home is only for "go home" or "show all projects" with NO project name after it.
 
+CRITICAL: Only match a command if the utterance IS the command (possibly with a parameter). If the utterance is a natural sentence that happens to contain a command word, return null. For example:
+- "stop" → stop-transcribe (standalone command)
+- "go ahead and then stop the server" → null (natural speech, "stop" is not a command here)
+- "send the email to john" → null (natural speech, not a "send" command)
+- "send" → press-enter (standalone command)
+- "delete three words" → delete-words with param "3" (command with parameter)
+- "I need to delete those files" → null (natural speech)
+The command words must be at the beginning of the utterance, not buried in a longer sentence.
+
 If nothing matches: {"commandId": null, "param": ""}
 Be lenient with transcription errors. Return ONLY valid JSON.`;
 
