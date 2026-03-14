@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, session } from 'electron';
+import { app, BrowserWindow, Menu, shell, ipcMain, session } from 'electron';
 import * as path from 'path';
 import { resolveCliPath, isServerReachable, startServer, waitForServer } from './server-manager';
 import { createTray } from './tray';
@@ -8,6 +8,9 @@ let mainWindow: BrowserWindow | null = null;
 const cliPath = resolveCliPath();
 
 function createWindow() {
+  // Remove default menu bar (File/Edit/View/Window/Help)
+  Menu.setApplicationMenu(null);
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
