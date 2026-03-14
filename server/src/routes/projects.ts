@@ -323,13 +323,69 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     const migrated = migrateSettingsHookPaths(project.path);
     if (migrated) output.push(migrated);
 
-    // Clean up stale claude-flow.config.json (ruflo uses .claude-flow/config.yaml now)
-    const staleConfig = join(project.path, 'claude-flow.config.json');
-    const newConfig = join(project.path, '.claude-flow', 'config.yaml');
-    if (existsSync(staleConfig) && existsSync(newConfig)) {
-      const { unlink } = await import('fs/promises');
-      await unlink(staleConfig);
-      output.push('[cleanup] Removed stale claude-flow.config.json');
+    // Clean up stale artifacts left by old ruflo versions.
+    // agentdb is now bundled inside ruflo — stale local copies (v2 alpha) cause
+    // "[AgentDB Patch] Controller index not found" warnings because the runtime patch
+    // finds the wrong version. Matches DevCortex installer cleanup logic.
+    // The agentdb-runtime-patch searches: cwd/node_modules/agentdb, then ../node_modules/agentdb,
+    // then $HOME/node_modules/agentdb — so we must clean ALL of these locations.
+    const cleanupDirs = [
+      project.path,        // project's own node_modules
+      homedir(),           // $HOME/node_modules (old ruflo scaffold at home level)
+    ];
+    // Also check parent directories up to $HOME (the patch walks up)
+    let parent = resolve(project.path, '..');
+    const home = homedir();
+    while (parent.length >= home.length && parent !== project.path) {
+      if (!cleanupDirs.includes(parent)) cleanupDirs.push(parent);
+      const next = resolve(parent, '..');
+      if (next === parent) break;
+      parent = next;
+    }
+
+    for (const dir of cleanupDirs) {
+      // Remove stale claude-flow.config.json
+      const staleConfig = join(dir, 'claude-flow.config.json');
+      if (existsSync(staleConfig) && existsSync(join(dir, '.claude-flow', 'config.yaml'))) {
+        try {
+          const { unlink: unlinkAsync } = await import('fs/promises');
+          await unlinkAsync(staleConfig);
+          output.push(`[cleanup] Removed stale claude-flow.config.json in ${dir}`);
+        } catch {}
+      }
+
+      // Remove stale agentdb (npm uninstall first, manual fallback)
+      const staleAgentdb = join(dir, 'node_modules', 'agentdb');
+      if (existsSync(staleAgentdb) && existsSync(join(dir, 'package.json'))) {
+        try {
+          await execFileAsync('npm', ['uninstall', 'agentdb'], { cwd: dir, timeout: 30_000 });
+          output.push(`[cleanup] Removed legacy agentdb from ${dir} (now bundled in ruflo)`);
+        } catch {
+          try {
+            const { rm } = await import('fs/promises');
+            await rm(staleAgentdb, { recursive: true, force: true });
+            output.push(`[cleanup] Removed stale node_modules/agentdb from ${dir} (manual)`);
+          } catch {}
+        }
+        // If the package.json is the old "claude-flow-project" scaffold with no real
+        // deps left, remove the whole thing (package.json, lock, empty node_modules)
+        try {
+          const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+          if (pkg.name === 'claude-flow-project') {
+            const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+            delete deps.agentdb; // already uninstalled
+            if (Object.keys(deps).length === 0) {
+              const { rm, unlink: unlinkAsync } = await import('fs/promises');
+              await unlinkAsync(join(dir, 'package.json'));
+              const staleLock = join(dir, 'package-lock.json');
+              if (existsSync(staleLock)) await unlinkAsync(staleLock);
+              const staleModules = join(dir, 'node_modules');
+              if (existsSync(staleModules)) await rm(staleModules, { recursive: true, force: true });
+              output.push(`[cleanup] Removed empty claude-flow-project scaffolding from ${dir}`);
+            }
+          }
+        } catch {}
+      }
     }
 
     return { ok: true, output: output.join('\n') };
