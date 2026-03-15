@@ -880,7 +880,7 @@ export async function spawnAgent(sessionId: string, projectPath: string, task: s
  * Reconnect to a detached session (tmux or dtach) after a server restart.
  * Forks a new worker process that attaches to the surviving session.
  */
-export async function reconnectSession(sessionId: string): Promise<boolean> {
+export async function reconnectSession(sessionId: string, opts?: { skipPipePaneReplay?: boolean }): Promise<boolean> {
   const t0 = Date.now();
   if (activeSessions.has(sessionId)) return false;
 
@@ -935,7 +935,7 @@ export async function reconnectSession(sessionId: string): Promise<boolean> {
     // Hivemind: fall back to tmux capture-pane (hivemind redraws on SIGWINCH).
     const seedStart = Date.now();
     let seeded = false;
-    if (session.task === 'Terminal') {
+    if (session.task === 'Terminal' && !opts?.skipPipePaneReplay) {
       try {
         const serialized = await serializeSessionOutput(
           sessionId,
@@ -955,13 +955,15 @@ export async function reconnectSession(sessionId: string): Promise<boolean> {
       try {
         const name = tmuxSessionName(sessionId);
         const { stdout: rawStdout } = await execFileAsync('tmux', [
-          ...tmuxBaseArgs, 'capture-pane', '-t', name, '-p', '-e', '-T',
+          ...tmuxBaseArgs, 'capture-pane', '-t', name, '-p', '-e', '-T', '-S', '-',
         ], { encoding: 'utf8', maxBuffer: 5 * 1024 * 1024 });
         const stdout = trimCaptureOutput(rawStdout);
         if (stdout) {
-          active.replayBuffer.push(stdout);
-          active.replayBytes = stdout.length;
-          captureCache.set(sessionId, { data: stdout, ts: Date.now() });
+          // Convert \n to \r\n for xterm.js — bare \n causes staircase (LF without CR)
+          const converted = stdout.replace(/\r?\n/g, '\r\n');
+          active.replayBuffer.push(converted);
+          active.replayBytes = converted.length;
+          captureCache.set(sessionId, { data: converted, ts: Date.now() });
         }
         tlog(`[RECONNECT] ${sessionId}: capture-seed=${Date.now() - seedStart}ms (${stdout?.length || 0} bytes)`);
       } catch { /* tmux might not be ready yet */ }
@@ -1092,12 +1094,14 @@ export function requestCapture(sessionId: string, ws: WebSocket): Promise<void> 
       const stdout = trimCaptureOutput(chunks.join(''));
       tlog(`[CAPTURE] ${sessionId}: done in ${Date.now() - t0}ms (${stdout.length} bytes, code=${code})`);
       if (code === 0 && stdout) {
-        captureCache.set(sessionId, { data: stdout, ts: Date.now() });
+        // Convert \n to \r\n for xterm.js — bare \n causes staircase (LF without CR)
+        const converted = stdout.replace(/\r?\n/g, '\r\n');
+        captureCache.set(sessionId, { data: converted, ts: Date.now() });
         try {
           ws.send(JSON.stringify({
             type: 'output',
             sessionId,
-            data: '\x1b[H\x1b[2J\x1b[3J' + stdout,
+            data: '\x1b[H\x1b[2J\x1b[3J' + converted,
           }));
         } catch { /* ws may have closed */ }
       }
@@ -1908,10 +1912,26 @@ async function readoptReleasedSession(tmuxName: string, _projectId?: string): Pr
     }
   } catch { /* no clients attached */ }
 
+  // Resize tmux window back to the dashboard width before reconnecting.
+  // The external terminal may have resized tmux to a different width, but our
+  // terminal_cols in the DB still reflects the last dashboard width (the worker
+  // was dead during the external session, so resizeSession was never called).
+  // This ensures capture-pane grabs content at the correct dashboard width.
+  const dashboardCols = session.terminal_cols || 120;
+  try {
+    await execFileAsync('tmux', [...tmuxBaseArgs, 'resize-window', '-t', tmuxName, '-x', String(dashboardCols)]);
+    // Unset window-size=manual that resize-window implicitly sets.
+    // Without this, future clients (e.g. Tilix on next pop-out) can't resize the window.
+    await execFileAsync('tmux', [...tmuxBaseArgs, 'set-option', '-t', tmuxName, '-u', 'window-size']);
+  } catch { /* ignore */ }
+
   // Mark as detached so reconnectSession() can pick it up
   db.prepare(`UPDATE sessions SET status = 'detached', updated_at = datetime('now') WHERE id = ?`).run(sessionId);
 
-  const ok = await reconnectSession(sessionId);
+  // Skip pipe-pane replay: the stored data is stale (from before pop-out).
+  // Commands run in the external terminal aren't captured by pipe-pane (worker was dead).
+  // Use capture-pane instead to get the current tmux screen state.
+  const ok = await reconnectSession(sessionId, { skipPipePaneReplay: true });
   if (!ok) return null;
 
   return db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) as Session;

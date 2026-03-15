@@ -17,7 +17,7 @@ export function initDb(): void {
 
   // Create tables
   db.exec(`
-    -- Projects registered with OpenFlow
+    -- Projects registered with HiveAlive
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -98,6 +98,7 @@ export function initDb(): void {
   try { db.exec('ALTER TABLE sessions ADD COLUMN external_socket TEXT'); } catch {}
   try { db.exec('ALTER TABLE projects ADD COLUMN default_web_url TEXT'); } catch {}
   try { db.exec('ALTER TABLE events ADD COLUMN project_id TEXT REFERENCES projects(id)'); } catch {}
+  try { db.exec('ALTER TABLE sessions ADD COLUMN pre_popout_cols INTEGER'); } catch {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id)'); } catch {}
 
   // Note: orphaned process cleanup is handled by cleanupStaleRunningSessions()
