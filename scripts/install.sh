@@ -421,7 +421,12 @@ case "$OS" in
     DESKTOP_FILE="openflow-desktop_${VERSION}_amd64.deb"
     ;;
   Darwin*)
-    DESKTOP_FILE="OpenFlow-${VERSION}.dmg"
+    ARCH="$(uname -m)"
+    if [ "$ARCH" = "arm64" ]; then
+      DESKTOP_FILE="OpenFlow-${VERSION}-arm64.dmg"
+    else
+      DESKTOP_FILE="OpenFlow-${VERSION}.dmg"
+    fi
     ;;
   *)
     DESKTOP_SUPPORTED=false
@@ -504,15 +509,7 @@ install_desktop_app() {
 if [ "$DESKTOP_SUPPORTED" = false ]; then
   log_warn "Desktop app is not available for this platform yet"
 elif [ "$DESKTOP_AVAILABLE" = false ]; then
-  case "$OS" in
-    Darwin*)
-      log_info "macOS desktop app is not yet available — coming soon!"
-      log_info "Use the web dashboard at http://localhost:42010 in the meantime."
-      ;;
-    *)
-      log_info "Desktop app not found for this release — use the web dashboard at http://localhost:42010"
-      ;;
-  esac
+  log_info "Desktop app not found for this release — download from GitHub Releases or use the web dashboard at http://localhost:42010"
 elif [ -e /dev/tty ]; then
   # Interactive — prompt (works even when piped: curl | bash)
   echo ""
