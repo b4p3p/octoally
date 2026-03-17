@@ -484,7 +484,6 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
     const statuses: Record<string, { installed: boolean; eligible: boolean; version?: string }> = {};
     for (const p of projects) {
-      const isHivecommandProject = p.name.toLowerCase().startsWith('hivecommand');
       const devcortexFile = join(p.path, '.devcortex');
       const installed = existsSync(devcortexFile);
       let version: string | undefined;
@@ -496,7 +495,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       }
       statuses[p.id] = {
         installed,
-        eligible: !isHivecommandProject && globalInstalled,
+        eligible: globalInstalled,
         version,
       };
     }
@@ -511,11 +510,6 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     const db = getDb();
     const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id) as Project | undefined;
     if (!project) return reply.status(404).send({ error: 'Project not found' });
-
-    // Don't allow install on hivecommand projects
-    if (project.name.toLowerCase().startsWith('hivecommand')) {
-      return reply.status(400).send({ error: 'DevCortex cannot be installed on HiveCommand projects' });
-    }
 
     // Read global config for the API key
     const globalConfigPath = join(homedir(), '.config', 'devcortex', 'config.json');
