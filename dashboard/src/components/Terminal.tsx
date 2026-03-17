@@ -220,15 +220,22 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       // WebGL not available, canvas2d renderer is the default fallback
     }
 
-    // Make URLs in terminal output clickable — open in system browser via server
-    term.loadAddon(new WebLinksAddon((_event, url) => {
+    // Make URLs in terminal output clickable — open in system browser
+    term.loadAddon(new WebLinksAddon((event, url) => {
+      event.preventDefault();
       console.log('[hivecommand] Link clicked in terminal:', url);
-      fetch('/api/open-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      }).then(r => console.log('[hivecommand] open-url response:', r.status))
-        .catch(e => console.error('[hivecommand] open-url failed:', e));
+      // In Electron: use IPC to call shell.openExternal directly (avoids
+      // xterm.js WebLinksAddon's window.open() which opens about:blank).
+      // In browser: use server API to call xdg-open/open.
+      if ('electronAPI' in window) {
+        (window as any).electronAPI.invoke('open-external', url);
+      } else {
+        fetch('/api/open-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        }).catch(e => console.error('[hivecommand] open-url failed:', e));
+      }
     }));
 
     // Fit after a small delay to ensure container is sized

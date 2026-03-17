@@ -27,16 +27,47 @@ function createWindow() {
     },
   });
 
-  // Handle external links — open in system browser instead of Electron
+  // Handle external links — open in system browser instead of Electron.
+  // xterm.js / Claude Code open links via window.open() with no URL first,
+  // then set .location.href on the child window. We intercept the child
+  // window's navigation to catch the actual URL and open it externally.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http://localhost:42010')) {
+      return { action: 'allow' };
+    }
+    // about:blank = xterm.js/Claude Code link pattern — allow window creation
+    // so we can intercept the subsequent .location.href navigation
+    if (!url || url === 'about:blank') {
       return { action: 'allow' };
     }
     shell.openExternal(url);
     return { action: 'deny' };
   });
 
-  // Intercept navigation to external URLs
+  // Watch for child windows created by window.open('about:blank') — when they
+  // navigate to the real URL, open it externally and close the child window
+  mainWindow.webContents.on('did-create-window', (childWindow) => {
+    let handled = false;
+    const openAndClose = (url: string) => {
+      if (handled) return;
+      handled = true;
+      shell.openExternal(url);
+      setImmediate(() => childWindow.close());
+    };
+    childWindow.webContents.on('will-navigate', (event, url) => {
+      if (url && url !== 'about:blank' && (url.startsWith('http://') || url.startsWith('https://'))) {
+        event.preventDefault();
+        openAndClose(url);
+      }
+    });
+    childWindow.webContents.on('did-start-navigation', (_event, url) => {
+      if (url && url !== 'about:blank' && (url.startsWith('http://') || url.startsWith('https://'))) {
+        openAndClose(url);
+      }
+    });
+  });
+
+  // Intercept navigation to external URLs in the main window
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('http://localhost:42010')) {
       event.preventDefault();
@@ -116,6 +147,11 @@ app.whenReady().then(async () => {
   // Register IPC handlers
   ipcMain.handle('get-version', () => app.getVersion());
   ipcMain.handle('app-quit', () => app.exit(0));
+  ipcMain.handle('open-external', (_event, url: string) => {
+    if (url && typeof url === 'string' && (url.startsWith('http://') || url.startsWith('https://'))) {
+      shell.openExternal(url);
+    }
+  });
   registerSpeechHandlers();
 
   // Start server if port 42010 is not reachable (regardless of PID file state)
