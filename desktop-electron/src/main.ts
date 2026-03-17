@@ -97,14 +97,15 @@ function createWindow() {
     if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) {
       mainWindow?.webContents.toggleDevTools();
     }
-    // F5: refresh, Ctrl+Shift+F5: hard refresh (bypass cache)
-    if (input.key === 'F5' && input.type === 'keyDown') {
+    // F5: refresh
+    if (input.key === 'F5' && !input.control && !input.shift && input.type === 'keyDown') {
       event.preventDefault();
-      if (input.control && input.shift) {
-        mainWindow?.webContents.reloadIgnoringCache();
-      } else {
-        mainWindow?.webContents.reload();
-      }
+      mainWindow?.webContents.reload();
+    }
+    // Ctrl+Shift+R: hard refresh (bypass cache)
+    if (input.key.toLowerCase() === 'r' && input.control && input.shift && input.type === 'keyDown') {
+      event.preventDefault();
+      mainWindow?.webContents.reloadIgnoringCache();
     }
     // Handle paste at the Electron level — synthetic keystrokes from text
     // expanders (espanso/xdotool/TextExpander) don't trigger browser paste events,
