@@ -383,7 +383,10 @@ fi
 
 # Install server production dependencies (native modules compile on this platform)
 log_info "Installing server dependencies..."
-npm install --omit=dev --prefix "$INSTALL_DIR/server" 2>&1 | tail -3
+if ! npm install --omit=dev --prefix "$INSTALL_DIR/server" 2>&1; then
+  log_error "npm install failed — see errors above"
+  exit 1
+fi
 
 log_ok "HiveCommand v${VERSION} installed to $INSTALL_DIR"
 

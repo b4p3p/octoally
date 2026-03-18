@@ -245,7 +245,7 @@ curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/hivecommand/m
 STATUS=$?
 echo ""
 if [ $STATUS -ne 0 ]; then
-  echo "\\033[0;31mUpdate failed (exit code $STATUS)\\033[0m"
+  echo -e "\\033[0;31mUpdate failed (exit code $STATUS)\\033[0m"
 fi
 echo ""
 echo "Press Enter to close this window..."
