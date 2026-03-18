@@ -63,9 +63,16 @@ export function createTray(opts: TrayOptions): Tray {
 async function refreshMenu(opts: TrayOptions) {
   if (!tray) return;
 
-  const reachable = await isServerReachable();
-  const cliManaged = isServerRunning(opts.cliPath);
-  const serviceInstalled = isServiceInstalled();
+  let reachable = false;
+  let cliManaged = false;
+  let serviceInstalled = false;
+  try {
+    reachable = await isServerReachable();
+    cliManaged = isServerRunning(opts.cliPath);
+    serviceInstalled = isServiceInstalled();
+  } catch (err) {
+    console.warn('[HiveCommand] Tray menu status check failed:', err);
+  }
 
   let statusLabel = 'Status: Stopped';
   if (reachable && cliManaged) {

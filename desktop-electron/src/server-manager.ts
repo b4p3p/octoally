@@ -5,14 +5,25 @@ import * as http from 'http';
 
 /** Resolve the hivecommand CLI path (mirrors Rust logic in desktop/src/main.rs) */
 export function resolveCliPath(): string {
-  // Try readlink -f on the standard install path
-  try {
-    const resolved = execFileSync('readlink', ['-f', '/usr/local/bin/hivecommand'], {
-      encoding: 'utf-8',
-      timeout: 3000,
-    }).trim();
-    if (resolved && fs.existsSync(resolved)) return resolved;
-  } catch {}
+  // Check the standard install path directly first
+  if (fs.existsSync('/usr/local/bin/hivecommand')) {
+    // Resolve symlinks — use realpath (works on macOS + Linux) with readlink -f as fallback
+    try {
+      const resolved = execFileSync('realpath', ['/usr/local/bin/hivecommand'], {
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+      if (resolved && fs.existsSync(resolved)) return resolved;
+    } catch {}
+    try {
+      const resolved = execFileSync('readlink', ['-f', '/usr/local/bin/hivecommand'], {
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+      if (resolved && fs.existsSync(resolved)) return resolved;
+    } catch {}
+    return '/usr/local/bin/hivecommand';
+  }
 
   // Fallback: check ~/.local/bin
   const home = process.env.HOME;
