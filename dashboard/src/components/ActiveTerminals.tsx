@@ -9,6 +9,7 @@ interface ActiveTerminalsProps {
   onBack: () => void;
   onGoToSession: (projectId: string, sessionId: string) => void;
   openProjectIds?: string[];
+  hiddenSessionIds?: string[];
 }
 
 interface SessionGroup {
@@ -26,7 +27,7 @@ interface ExpandedSession {
 const COLUMNS_KEY = 'hivecommand-active-terminals-cols';
 const ROWS_KEY = 'hivecommand-active-terminals-rows';
 
-export function ActiveTerminals({ onBack, onGoToSession, openProjectIds }: ActiveTerminalsProps) {
+export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenSessionIds }: ActiveTerminalsProps) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState<ExpandedSession | null>(null);
   const [jumpOpen, setJumpOpen] = useState(false);
@@ -110,11 +111,16 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds }: Activ
     (s) => s.status === 'running' || s.status === 'detached'
   );
 
-  // Split into shown (open tab or plain terminal) vs hidden (tab not open)
+  // Split into shown (open tab or plain terminal) vs hidden (tab not open or individually hidden)
   const openSet = openProjectIds ? new Set(openProjectIds) : null;
-  const normallyShown = openSet
-    ? activeSessions.filter((s) => !s.project_id || openSet.has(s.project_id))
-    : activeSessions;
+  const hiddenSet = hiddenSessionIds && hiddenSessionIds.length > 0 ? new Set(hiddenSessionIds) : null;
+  const normallyShown = activeSessions.filter((s) => {
+    // Exclude sessions from closed project tabs
+    if (openSet && s.project_id && !openSet.has(s.project_id)) return false;
+    // Exclude individually hidden session tabs
+    if (hiddenSet && hiddenSet.has(s.id)) return false;
+    return true;
+  });
   const hiddenCount = activeSessions.length - normallyShown.length;
   const shownSessions = showAll ? activeSessions : normallyShown;
 

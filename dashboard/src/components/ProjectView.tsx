@@ -21,6 +21,8 @@ interface ProjectViewProps {
   /** When set, switch to this terminal session ID and clear it */
   focusSessionId?: string | null;
   onFocusSessionHandled?: () => void;
+  /** Report hidden (closed-tab) session IDs to parent */
+  onHiddenSessionsChange?: (sessionIds: string[]) => void;
 }
 
 interface ExplorerInstance {
@@ -99,7 +101,7 @@ const sidebarButtons = [
   { id: 'git' as const, icon: GitBranch, title: 'Source Control' },
 ] as const;
 
-export function ProjectView({ projectId, projectPath, projectName: _projectName, active = true, terminalsSuspended = false, focusSessionId, onFocusSessionHandled }: ProjectViewProps) {
+export function ProjectView({ projectId, projectPath, projectName: _projectName, active = true, terminalsSuspended = false, focusSessionId, onFocusSessionHandled, onHiddenSessionsChange }: ProjectViewProps) {
   const queryClient = useQueryClient();
 
   // Fetch project data for SessionLauncher
@@ -208,6 +210,11 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   const closedSessionIds = useRef(new Set<string>());
   // Counter to force re-render when closedSessionIds changes (refs don't trigger re-renders)
   const [closedIdsVersion, setClosedIdsVersion] = useState(0);
+
+  // Report hidden session IDs to parent (for Active Sessions filtering)
+  useEffect(() => {
+    onHiddenSessionsChange?.([...closedSessionIds.current]);
+  }, [closedIdsVersion, onHiddenSessionsChange]);
 
   // Sync terminal instances with server sessions (auto-detect running sessions)
   const syncedRef = useRef(false);
@@ -737,7 +744,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   // Sub-tab bar for terminal and explorer modes
   const showSubTabs = activeMode === 'terminal' || activeMode === 'explorer';
 
-  const gridMode = showAllTerminals && !showLauncher && terminalInstances.length >= 2;
+  const gridMode = showAllTerminals && !showLauncher && (terminalInstances.length + hiddenSessions.length) >= 2;
 
   // Persist grid preferences
   useEffect(() => {
@@ -776,7 +783,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   // full width and need to refit to the narrower grid card width.
   // Dispatch refresh-terminal event for each terminal after layout settles.
   useEffect(() => {
-    if (!gridMode) { setGridMounted(false); return; }
+    if (!gridMode) { setGridMounted(false); setGridShowAll(false); return; }
     const t1 = setTimeout(() => {
       setGridMounted(true);
     }, 100);
@@ -792,11 +799,17 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
   }, [gridMode, terminalInstances]);
 
-  // Shown vs hidden sessions in grid
-  const gridVisibleInstances = gridShowAll
-    ? terminalInstances
-    : terminalInstances.filter((t) => !closedSessionIds.current.has(t.id));
-  const gridHiddenCount = terminalInstances.length - gridVisibleInstances.length;
+  // Shown vs hidden sessions in grid — hiddenSessions are sessions with closed tabs
+  // that are still running but not in terminalInstances
+  const hiddenAsInstances: TerminalInstance[] = hiddenSessions.map((s) => {
+    const isTerminal = s.task === 'Terminal';
+    const isAgent = s.task?.startsWith('Agent (');
+    const prefix = isTerminal ? 'Terminal' : isAgent ? 'Agent' : 'Hivemind';
+    return { id: s.id, label: `${prefix} (hidden)` };
+  });
+  const allGridInstances = [...terminalInstances, ...hiddenAsInstances];
+  const gridVisibleInstances = gridShowAll ? allGridInstances : terminalInstances;
+  const gridHiddenCount = hiddenSessions.length;
 
   return (
     <div className="h-full flex">
@@ -922,8 +935,8 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                   );
                 })}
 
-                {/* All Terminals grid view button — shown when 2+ terminals */}
-                {terminalInstances.length >= 2 && (
+                {/* All Terminals grid view button — shown when 2+ total sessions (visible + hidden) */}
+                {(terminalInstances.length + hiddenSessions.length) >= 2 && (
                   <button
                     onClick={() => {
                       setShowAllTerminals(!showAllTerminals);
@@ -1223,7 +1236,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                       className="text-[10px] px-1.5 py-0.5 rounded-full"
                       style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}
                     >
-                      {terminalInstances.length}
+                      {allGridInstances.length}
                     </span>
                     {gridHiddenCount > 0 && !gridShowAll && (
                       <>
