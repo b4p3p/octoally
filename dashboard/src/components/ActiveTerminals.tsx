@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { Session, Project } from '../lib/api';
 import { Terminal } from './Terminal';
-import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Zap, Bot, TerminalSquare } from 'lucide-react';
+import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Rows3, Zap, Bot, TerminalSquare } from 'lucide-react';
 
 interface ActiveTerminalsProps {
   onBack: () => void;
@@ -23,42 +23,60 @@ interface ExpandedSession {
 }
 
 const COLUMNS_KEY = 'hivecommand-active-terminals-cols';
+const ROWS_KEY = 'hivecommand-active-terminals-rows';
 
 export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState<ExpandedSession | null>(null);
   const [jumpOpen, setJumpOpen] = useState(false);
   const [colsOpen, setColsOpen] = useState(false);
+  const [rowsOpen, setRowsOpen] = useState(false);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
   const [columns, setColumns] = useState(() => {
     const saved = localStorage.getItem(COLUMNS_KEY);
     return saved ? Math.min(10, Math.max(1, parseInt(saved, 10) || 3)) : 3;
+  });
+  const [rows, setRows] = useState<number | 'auto'>(() => {
+    const saved = localStorage.getItem(ROWS_KEY);
+    if (!saved || saved === 'auto') return 'auto';
+    return Math.min(6, Math.max(1, parseInt(saved, 10) || 2));
   });
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const [cardHeight, setCardHeight] = useState(420);
 
-  // Persist column preference
+  // Persist column and row preferences
   useEffect(() => {
     localStorage.setItem(COLUMNS_KEY, String(columns));
   }, [columns]);
+  useEffect(() => {
+    localStorage.setItem(ROWS_KEY, String(rows));
+  }, [rows]);
 
-  // Calculate card height based on 16:9 ratio from actual card width
+  // Calculate card height: row-count mode divides container height, auto uses 16:9 ratio
   useEffect(() => {
     function updateHeight() {
-      if (!gridRef.current) return;
-      const gridWidth = gridRef.current.clientWidth;
-      const gap = 16; // gap-4 = 16px
-      const cardWidth = (gridWidth - gap * (columns - 1)) / columns;
-      // 16:9 ratio + ~40px for card header
-      const height = Math.round(cardWidth * (9 / 16)) + 40;
-      setCardHeight(Math.max(200, height));
+      if (rows !== 'auto') {
+        if (!scrollContainerRef.current) return;
+        const containerHeight = scrollContainerRef.current.clientHeight;
+        const gap = 16; // gap-4 = 16px
+        const padding = 32; // p-4 = 16px * 2
+        const height = Math.round((containerHeight - padding - gap * (rows - 1)) / rows);
+        setCardHeight(Math.max(150, height));
+      } else {
+        if (!gridRef.current) return;
+        const gridWidth = gridRef.current.clientWidth;
+        const gap = 16;
+        const cardWidth = (gridWidth - gap * (columns - 1)) / columns;
+        const height = Math.round(cardWidth * (9 / 16)) + 40;
+        setCardHeight(Math.max(200, height));
+      }
     }
     updateHeight();
     window.addEventListener('resize', updateHeight);
     return () => window.removeEventListener('resize', updateHeight);
-  }, [columns]);
+  }, [columns, rows]);
 
 
   const { data: sessionsData } = useQuery({
@@ -182,6 +200,54 @@ export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps)
                     }}
                   >
                     {n} column{n !== 1 ? 's' : ''}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Rows dropdown */}
+        <div className="relative">
+          <button
+            onClick={() => setRowsOpen(!rowsOpen)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors"
+            style={{ background: 'var(--bg-tertiary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+          >
+            <Rows3 className="w-3.5 h-3.5" />
+            {rows === 'auto' ? 'Auto' : `${rows} row${rows !== 1 ? 's' : ''}`}
+            <ChevronDown className={`w-3 h-3 transition-transform ${rowsOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {rowsOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setRowsOpen(false)} />
+              <div
+                className="absolute right-0 top-full mt-1 z-50 rounded-lg border shadow-xl overflow-hidden"
+                style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border)', width: '120px' }}
+              >
+                <button
+                  onClick={() => { setRows('auto'); setRowsOpen(false); }}
+                  className="flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors hover:bg-white/5"
+                  style={{
+                    color: rows === 'auto' ? 'var(--accent)' : 'var(--text-secondary)',
+                    fontWeight: rows === 'auto' ? 600 : 400,
+                    borderBottom: '1px solid var(--border)',
+                  }}
+                >
+                  Auto (16:9)
+                </button>
+                {[1, 2, 3, 4, 5, 6].map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => { setRows(n); setRowsOpen(false); }}
+                    className="flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors hover:bg-white/5"
+                    style={{
+                      color: n === rows ? 'var(--accent)' : 'var(--text-secondary)',
+                      fontWeight: n === rows ? 600 : 400,
+                      borderBottom: '1px solid var(--border)',
+                    }}
+                  >
+                    {n} row{n !== 1 ? 's' : ''}
                   </button>
                 ))}
               </div>
