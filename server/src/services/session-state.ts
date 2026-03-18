@@ -211,7 +211,12 @@ export class SessionStateTracker {
   onData(data: string): void {
     this._lastActivity = Date.now();
     const cleaned = strip(data);
+    // Cap output buffer to prevent unbounded memory growth in long-running sessions
+    const MAX_OUTPUT_BUFFER = 32_768; // 32KB
     this._outputSinceInput += cleaned;
+    if (this._outputSinceInput.length > MAX_OUTPUT_BUFFER) {
+      this._outputSinceInput = this._outputSinceInput.slice(-MAX_OUTPUT_BUFFER);
+    }
 
     // Feed raw data to virtual terminal (synchronous, in-memory only)
     this._vt.write(data);

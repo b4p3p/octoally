@@ -172,10 +172,11 @@ function flushPtyInserts(): void {
   });
   try {
     insertAll();
+    pendingInserts.clear();
   } catch (err) {
     console.error('Failed to flush pty_output inserts:', err);
+    // Don't clear pendingInserts — retry on next flush cycle
   }
-  pendingInserts.clear();
 
   // Prune old rows every ~240 flushes (~60s) as a safety net.
   // Primary cleanup happens immediately on session kill/exit and at startup.
@@ -1402,7 +1403,16 @@ export function listSessions(status?: string): Session[] {
   if (status) {
     return db.prepare('SELECT * FROM sessions WHERE status = ? ORDER BY created_at DESC').all(status) as Session[];
   }
-  return db.prepare('SELECT * FROM sessions ORDER BY created_at DESC LIMIT 50').all() as Session[];
+  // Return ALL active sessions (never drop them) plus the 50 most recent inactive ones
+  return db.prepare(`
+    SELECT * FROM sessions WHERE status IN ('running', 'pending', 'launching')
+    UNION ALL
+    SELECT * FROM (
+      SELECT * FROM sessions WHERE status NOT IN ('running', 'pending', 'launching')
+      ORDER BY created_at DESC LIMIT 50
+    )
+    ORDER BY created_at DESC
+  `).all() as Session[];
 }
 
 export function isSessionActive(sessionId: string): boolean {
