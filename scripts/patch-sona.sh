@@ -121,18 +121,47 @@ function callLearningHooks(command, args) {
   }
 }
 
+// Pending insights log — same file intelligence.cjs writes to on each edit
+const PENDING_PATH = path.join(projectRoot, '.claude-flow', 'data', 'pending-insights.jsonl');
+const EDIT_PROMOTION_THRESHOLD = 3; // same as ruflo's intelligence.cjs consolidate()
+
+function consolidateEdits() {
+  if (!fs.existsSync(PENDING_PATH)) return 0;
+  try {
+    const lines = fs.readFileSync(PENDING_PATH, 'utf-8').trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return 0;
+    const editCounts = {};
+    for (const line of lines) {
+      try {
+        const insight = JSON.parse(line);
+        if (insight.file) editCounts[insight.file] = (editCounts[insight.file] || 0) + 1;
+      } catch {}
+    }
+    let stored = 0;
+    for (const [file, count] of Object.entries(editCounts)) {
+      if (count >= EDIT_PROMOTION_THRESHOLD) {
+        const shortFile = file.split('/').slice(-2).join('/');
+        callLearningService('store', ['Hot path: ' + shortFile + ' edited ' + count + 'x this session', 'edit-pattern']);
+        stored++;
+      }
+    }
+    return stored;
+  } catch { return 0; }
+}
+
 module.exports = {
   sessionStart(sessionId) {
-    // Try learning-hooks.sh first (has better output), fall back to learning-service.mjs
     const result = callLearningHooks('session-start', sessionId ? [sessionId] : []);
     if (result) return result;
     return callLearningService('init', sessionId ? [sessionId] : []);
   },
 
   sessionEnd() {
+    const promoted = consolidateEdits();
     const result = callLearningHooks('session-end', []);
-    if (result) return result;
-    return callLearningService('consolidate', []);
+    if (result) return (promoted > 0 ? '[SONA] Promoted ' + promoted + ' edit patterns. ' : '') + result;
+    const consolidateResult = callLearningService('consolidate', []);
+    return (promoted > 0 ? '[SONA] Promoted ' + promoted + ' edit patterns. ' : '') + (consolidateResult || '');
   },
 
   storePattern(strategy, domain) {
@@ -214,48 +243,21 @@ patch_hook_handler() {
       \"    // Initialize intelligence graph after session restore\"
     );
 
-    // Patch post-edit to record file edit as SONA pattern
-    content = content.replace(
-      /\/\/ Record edit for intelligence consolidation/,
-      \"// Record edit as SONA pattern\\n\" +
-      \"    if (sonaBridge && sonaBridge.isAvailable && sonaBridge.isAvailable()) {\\n\" +
-      \"      try {\\n\" +
-      \"        const editFile = (hookInput.tool_input && hookInput.tool_input.file_path) || hookInput.file_path\\n\" +
-      \"          || (hookInput.toolInput && hookInput.toolInput.file_path) || '';\\n\" +
-      \"        if (editFile) sonaBridge.storePattern('Edit ' + editFile.split('/').slice(-2).join('/'), 'edit');\\n\" +
-      \"      } catch (e) { /* non-fatal */ }\\n\" +
-      \"    }\\n\" +
-      \"    // Record edit for intelligence consolidation\"
-    );
-
-    // Patch session-end to consolidate SONA
+    // Patch session-end to consolidate SONA (promotes 3+ edit files, then prunes)
+    // No per-edit or per-task storage — mirrors ruflo's intent:
+    //   post-edit  → intelligence.recordEdit() logs to pending-insights.jsonl
+    //   post-task  → intelligence.feedback(true) boosts confidence
+    //   session-end → consolidateEdits() promotes hot files to SONA, then consolidate()
     content = content.replace(
       /\/\/ Consolidate intelligence before ending session/,
-      \"// Consolidate SONA learning data\\n\" +
+      \"// Consolidate SONA learning data (promotes 3+ edit files, then prunes)\\n\" +
       \"    if (sonaBridge && sonaBridge.isAvailable && sonaBridge.isAvailable()) {\\n\" +
       \"      try {\\n\" +
       \"        const sonaResult = sonaBridge.sessionEnd();\\n\" +
-      \"        if (sonaResult) console.log('[SONA] Session consolidated');\\n\" +
+      \"        if (sonaResult) console.log('[SONA] ' + sonaResult.split('\\\\n')[0].substring(0, 120));\\n\" +
       \"      } catch (e) { /* non-fatal */ }\\n\" +
       \"    }\\n\" +
       \"    // Consolidate intelligence before ending session\"
-    );
-
-    // Patch post-task to store pattern
-    // SubagentStop sends: { agentName, taskDescription, ... } via stdin
-    // PostToolUse sends: { tool_name, ... }
-    // We try multiple fields to find the task description
-    content = content.replace(
-      /\/\/ Implicit success feedback for intelligence/,
-      \"// Record task completion as SONA trajectory\\n\" +
-      \"    const sonaPrompt = hookInput.taskDescription || hookInput.description || hookInput.task\\n\" +
-      \"      || hookInput.agentName || prompt || '';\\n\" +
-      \"    if (sonaBridge && sonaBridge.isAvailable && sonaBridge.isAvailable() && sonaPrompt) {\\n\" +
-      \"      try {\\n\" +
-      \"        sonaBridge.storePattern(sonaPrompt.substring(0, 500), 'task');\\n\" +
-      \"      } catch (e) { /* non-fatal */ }\\n\" +
-      \"    }\\n\" +
-      \"    // Implicit success feedback for intelligence\"
     );
 
     fs.writeFileSync('$tempfile', content);
