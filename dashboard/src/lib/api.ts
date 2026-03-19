@@ -325,6 +325,8 @@ export interface RufloProjectStatus {
   installed: boolean;
   version: string | null;
   memoryInitialized: boolean;
+  sonaPatchVersion?: number;
+  sonaPatchOutdated?: boolean;
 }
 
 export interface RufloStatusResponse {

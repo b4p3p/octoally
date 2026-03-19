@@ -1242,7 +1242,17 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
   const installMutation = useMutation({
     mutationFn: (id: string) => api.projects.rufloInstall(id),
     onMutate: (id) => { setInstallingId(id); setInstallError(null); },
-    onSuccess: () => setInstallError(null),
+    onSuccess: async (_data, id) => {
+      setInstallError(null);
+      // Auto-reinstall DevCortex after ruflo re-init if project has it
+      const dctxStatus = dctxStatusData?.statuses?.[id];
+      if (dctxStatusData?.globalInstalled && dctxStatus?.installed) {
+        try {
+          await api.projects.devcortexInstall(id);
+          queryClient.invalidateQueries({ queryKey: ['devcortex-status'] });
+        } catch { /* DevCortex reinstall failed — ruflo re-init still succeeded */ }
+      }
+    },
     onError: (err: Error) => setInstallError(err.message || 'Install failed'),
     onSettled: () => {
       setInstallingId(null);
@@ -1447,6 +1457,16 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
                         <span className="text-[10px] font-mono shrink-0" style={{ color, opacity: 0.7 }}>
                           v{version}
                         </span>
+                      )}
+                      {cfStatus?.sonaPatchOutdated && (
+                        <button
+                          className="shrink-0 ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap animate-pulse"
+                          style={{ background: '#f59e0b20', color: '#f59e0b', border: '1px solid #f59e0b44' }}
+                          title="SONA learning patch outdated — click to re-init RuFlo and update"
+                          onClick={(e) => { e.stopPropagation(); handleRufloInstall(project.id); }}
+                        >
+                          Re-init
+                        </button>
                       )}
                       {(() => {
                         const counts = activeSessionsByProject[project.id];

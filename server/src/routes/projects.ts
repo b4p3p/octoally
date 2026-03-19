@@ -252,26 +252,46 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     const projects = db.prepare('SELECT id, path FROM projects').all() as { id: string; path: string }[];
 
     // Check all projects in parallel using file existence only (no npx calls - too slow)
+    // Current SONA patch version — bump when patch-sona.sh changes
+    const CURRENT_SONA_PATCH_VERSION = 2;
+
     const entries = await Promise.all(
       projects.map(async (p) => {
         const hasMemory = hasValidMemoryDb(p.path);
         const hasSwarm = existsSync(join(p.path, '.swarm'));
         const hasClaudeFlow = existsSync(join(p.path, '.claude-flow', 'config.yaml'));
         const hasClaudeSettings = existsSync(join(p.path, '.claude', 'settings.json'));
+        const installed = hasSwarm || hasMemory || hasClaudeFlow || hasClaudeSettings;
+
+        // Detect SONA patch version from hook-handler sentinel
+        let sonaPatchVersion = 0;
+        if (installed) {
+          try {
+            const hookHandler = join(p.path, '.claude', 'helpers', 'hook-handler.cjs');
+            if (existsSync(hookHandler)) {
+              const content = readFileSync(hookHandler, 'utf-8').slice(0, 1000);
+              const match = content.match(/SONA_PATCH_v(\d+)/);
+              if (match) sonaPatchVersion = parseInt(match[1], 10);
+            }
+          } catch { /* non-fatal */ }
+        }
+
         return [p.id, {
-          installed: hasSwarm || hasMemory || hasClaudeFlow || hasClaudeSettings,
+          installed,
           version: null,
           memoryInitialized: hasMemory,
+          sonaPatchVersion,
+          sonaPatchOutdated: installed && sonaPatchVersion < CURRENT_SONA_PATCH_VERSION,
         }] as const;
       })
     );
 
-    const statuses: Record<string, { installed: boolean; version: string | null; memoryInitialized: boolean }> = {};
+    const statuses: Record<string, { installed: boolean; version: string | null; memoryInitialized: boolean; sonaPatchVersion: number; sonaPatchOutdated: boolean }> = {};
     for (const [id, status] of entries) {
       statuses[id] = status;
     }
 
-    return { statuses };
+    return { statuses, currentSonaPatchVersion: CURRENT_SONA_PATCH_VERSION };
   });
 
   // Check for existing config files that ruflo init would overwrite
