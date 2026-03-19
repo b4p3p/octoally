@@ -836,7 +836,7 @@ ESPANSO_EOF
         log_ok "Configured espanso text expander for OctoAlly"
       fi
       # Remove old espanso config if present
-      [ -f "$ESPANSO_CONFIG_DIR/hivecommand.yml" ] && rm -f "$ESPANSO_CONFIG_DIR/hivecommand.yml"
+      [ -f "$ESPANSO_CONFIG_DIR/hivecommand.yml" ] && rm -f "$ESPANSO_CONFIG_DIR/hivecommand.yml" || true
       ;;
     Darwin*)
       log_info "Mounting DMG..."
