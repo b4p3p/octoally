@@ -34,7 +34,7 @@
 <tr>
 <td width="50%">
 <img src="docs/screenshots/projects.png" alt="Project Management">
-<p><b>Project Management</b> — Organize all your projects in one place. Add project folders, track RuFlo and DevCortex status, manage git repos and branches, and launch sessions directly from the project card. Each project gets its own configuration and session history.</p>
+<p><b>Project Management</b> — Organize all your projects in one place. Add project folders, track RuFlo status, manage git repos and branches, and launch sessions directly from the project card. Each project gets its own configuration and session history.</p>
 </td>
 <td width="50%">
 <img src="docs/screenshots/hivemind.png" alt="Hive-Mind Session">
