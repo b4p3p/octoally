@@ -398,31 +398,47 @@ log_ok "Downloaded ($(du -h "$TMPFILE" | cut -f1))"
 
 log_step 3 "Installing to $INSTALL_DIR..."
 
-# Stop existing server if running — try PID file first, then CLI, then pkill
-if [ -f "$INSTALL_DIR/.octoally.pid" ]; then
-  local_pid=$(cat "$INSTALL_DIR/.octoally.pid" 2>/dev/null || echo "")
-  if [ -n "$local_pid" ] && kill -0 "$local_pid" 2>/dev/null; then
-    log_info "Stopping existing server (PID $local_pid)..."
-    kill "$local_pid" 2>/dev/null || true
-    sleep 1
-    # Force kill if still running
-    kill -0 "$local_pid" 2>/dev/null && kill -9 "$local_pid" 2>/dev/null || true
+# Stop existing server if running — try PID file first, then CLI, then pkill.
+# Check both old (hivecommand) and new (octoally) names for upgrade scenarios.
+_stop_pid_file() {
+  local pidfile="$1"
+  if [ -f "$pidfile" ]; then
+    local pid
+    pid=$(cat "$pidfile" 2>/dev/null || echo "")
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log_info "Stopping existing server (PID $pid)..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    fi
   fi
-fi
-# Fallback: use CLI stop if available
+}
+_stop_pid_file "$INSTALL_DIR/.octoally.pid"
+_stop_pid_file "$INSTALL_DIR/.hivecommand.pid"
+_stop_pid_file "$TARGET_HOME/hivecommand/.hivecommand.pid"
+_stop_pid_file "$TARGET_HOME/hivecommand/.octoally.pid"
+# Fallback: use CLI stop if available (try both old and new names)
 if command -v octoally &>/dev/null; then
   octoally stop 2>/dev/null || true
+fi
+if command -v hivecommand &>/dev/null; then
+  hivecommand stop 2>/dev/null || true
 fi
 # Fallback: kill any remaining server process on our port
 if command -v fuser &>/dev/null; then
   fuser -k 42010/tcp 2>/dev/null || true
+elif command -v lsof &>/dev/null; then
+  # macOS: lsof is available where fuser is not
+  lsof -ti tcp:42010 2>/dev/null | xargs kill -9 2>/dev/null || true
 fi
 
 # Kill running desktop app — SIGTERM first, then SIGKILL after 1s.
 # Electron hangs on close when the server is dead (webview stuck reconnecting).
-if pkill -f "octoally-desktop" 2>/dev/null; then
+# Kill both old (hivecommand-desktop) and new (octoally-desktop) process names.
+if pkill -f "hivecommand-desktop" 2>/dev/null || pkill -f "octoally-desktop" 2>/dev/null; then
   log_info "Stopping desktop app..."
   sleep 1
+  pkill -9 -f "hivecommand-desktop" 2>/dev/null || true
   pkill -9 -f "octoally-desktop" 2>/dev/null || true
 fi
 
