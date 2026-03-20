@@ -1,7 +1,7 @@
 import { fork, execFile, execFileSync, spawn, type ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import { createRequire } from 'module';
-import { readFile, readdirSync, readFileSync, existsSync, unlinkSync, appendFileSync } from 'fs';
+import { readFile, readdirSync, readFileSync, writeFileSync as fsWriteFileSync, existsSync, unlinkSync, appendFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
@@ -26,6 +26,51 @@ function tlog(s: string): void {
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/* ================================================================
+   Restart storm detection & session spawn guard
+   ================================================================ */
+
+const RESTART_LOG = '/tmp/octoally-restart-timestamps.json';
+/** Max server starts within RESTART_WINDOW_MS before we skip auto-resume */
+const RESTART_STORM_THRESHOLD = 3;
+const RESTART_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+/** Max concurrent active sessions (workers). Generous to allow power users. */
+const MAX_ACTIVE_SESSIONS = 30;
+/** Max sessions to auto-reconnect concurrently (prevents thundering herd) */
+const RECONNECT_BATCH_SIZE = 5;
+/** Max times a single session can be auto-resumed before giving up */
+const MAX_SESSION_RESUMES = 3;
+
+function recordServerStart(): void {
+  let timestamps: number[] = [];
+  try {
+    timestamps = JSON.parse(readFileSync(RESTART_LOG, 'utf-8'));
+  } catch { /* first run or corrupt */ }
+  const now = Date.now();
+  timestamps.push(now);
+  // Keep only timestamps within the window
+  timestamps = timestamps.filter(ts => now - ts < RESTART_WINDOW_MS);
+  try { fsWriteFileSync(RESTART_LOG, JSON.stringify(timestamps)); } catch {}
+}
+
+function isRestartStorm(): boolean {
+  let timestamps: number[] = [];
+  try {
+    timestamps = JSON.parse(readFileSync(RESTART_LOG, 'utf-8'));
+  } catch { return false; }
+  const now = Date.now();
+  const recent = timestamps.filter(ts => now - ts < RESTART_WINDOW_MS);
+  return recent.length >= RESTART_STORM_THRESHOLD;
+}
+
+/**
+ * Check if spawning another session would exceed the active session cap.
+ * Returns true if the spawn should be blocked.
+ */
+export function isAtSessionLimit(): boolean {
+  return activeSessions.size >= MAX_ACTIVE_SESSIONS;
+}
 
 /** Path to the PTY worker script — resolved relative to this file */
 const WORKER_SCRIPT = join(__dirname, 'pty-worker.js');
@@ -1537,6 +1582,7 @@ export function killAllSessions(): void {
 export async function cleanupStaleRunningSessions(): Promise<void> {
   const t0 = Date.now();
   tlog(`[CLEANUP] start`);
+  recordServerStart();
   const db = getDb();
 
   if (config.useDtach || config.useTmux) {
@@ -1603,23 +1649,44 @@ export async function cleanupStaleRunningSessions(): Promise<void> {
       }
     }
 
-    for (const session of resumable) {
-      const project = db.prepare('SELECT path FROM projects WHERE id = ?').get(session.project_id!) as { path: string } | undefined;
-      if (!project) {
-        db.prepare(`
-          UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
-          WHERE id = ?
-        `).run(session.id);
-        continue;
-      }
-      try {
-        await resumeCrashedSession(session as Session, project.path);
-      } catch (err) {
-        console.error(`  Failed to resume session ${session.id}:`, err);
-        db.prepare(`
-          UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
-          WHERE id = ?
-        `).run(session.id);
+    // Circuit breaker: skip auto-resume if server is restart-looping
+    if (isRestartStorm()) {
+      console.warn(`  [CIRCUIT BREAKER] Server restarted ${RESTART_STORM_THRESHOLD}+ times in ${RESTART_WINDOW_MS / 60000}min — skipping auto-resume of ${resumable.length} session(s) to prevent runaway spawning`);
+      const markFailed = db.prepare(`
+        UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
+        WHERE id = ?
+      `);
+      for (const s of resumable) markFailed.run(s.id);
+    } else {
+      for (const session of resumable) {
+        // Session cap: don't resume if we'd exceed the limit
+        if (isAtSessionLimit()) {
+          console.warn(`  [SESSION CAP] Already ${activeSessions.size} active sessions (max ${MAX_ACTIVE_SESSIONS}) — skipping resume of remaining sessions`);
+          const markFailed = db.prepare(`
+            UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
+            WHERE id = ?
+          `);
+          for (const s of resumable.slice(resumable.indexOf(session))) markFailed.run(s.id);
+          break;
+        }
+
+        const project = db.prepare('SELECT path FROM projects WHERE id = ?').get(session.project_id!) as { path: string } | undefined;
+        if (!project) {
+          db.prepare(`
+            UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
+            WHERE id = ?
+          `).run(session.id);
+          continue;
+        }
+        try {
+          await resumeCrashedSession(session as Session, project.path);
+        } catch (err) {
+          console.error(`  Failed to resume session ${session.id}:`, err);
+          db.prepare(`
+            UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
+            WHERE id = ?
+          `).run(session.id);
+        }
       }
     }
   }
@@ -1686,25 +1753,42 @@ export async function autoReconnectDetachedSessions(): Promise<void> {
   tlog(`[AUTO-RECONNECT] start`);
   if (!config.useDtach && !config.useTmux) { tlog(`[AUTO-RECONNECT] skipped (no tmux/dtach)`); return; }
 
+  // Circuit breaker: skip if restart-looping
+  if (isRestartStorm()) {
+    console.warn(`  [CIRCUIT BREAKER] Restart storm detected — skipping auto-reconnect to prevent runaway spawning`);
+    tlog(`[AUTO-RECONNECT] skipped (restart storm)`);
+    return;
+  }
+
   const db = getDb();
   const detached = db.prepare(`
     SELECT id FROM sessions WHERE status = 'detached'
   `).all() as { id: string }[];
 
   if (detached.length === 0) { tlog(`[AUTO-RECONNECT] no detached sessions`); return; }
-  tlog(`[AUTO-RECONNECT] reconnecting ${detached.length} sessions`);
+  tlog(`[AUTO-RECONNECT] reconnecting ${detached.length} sessions (batch size: ${RECONNECT_BATCH_SIZE})`);
 
   _reconnecting = true;
   _reconnectTotal = detached.length;
   _reconnectDone = 0;
 
-  // Reconnect all detached sessions in parallel — each gets its own worker
-  const results = await Promise.allSettled(
-    detached.map(({ id }) => reconnectSession(id).finally(() => { _reconnectDone++; }))
-  );
+  // Reconnect in batches to prevent thundering herd of worker spawns
+  let reconnected = 0;
+  for (let i = 0; i < detached.length; i += RECONNECT_BATCH_SIZE) {
+    // Check session cap before each batch
+    if (isAtSessionLimit()) {
+      console.warn(`  [SESSION CAP] Hit ${MAX_ACTIVE_SESSIONS} active sessions — stopping auto-reconnect (${_reconnectDone}/${detached.length} done)`);
+      break;
+    }
+
+    const batch = detached.slice(i, i + RECONNECT_BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(({ id }) => reconnectSession(id).finally(() => { _reconnectDone++; }))
+    );
+    reconnected += results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+  }
 
   _reconnecting = false;
-  const reconnected = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
   tlog(`[AUTO-RECONNECT] done in ${Date.now() - t0}ms (${reconnected}/${detached.length} reconnected)`);
   if (reconnected > 0) {
     console.log(`  Auto-reconnected ${reconnected} detached session(s)`);
@@ -1721,7 +1805,20 @@ async function resumeCrashedSession(staleSession: Session, projectPath: string):
   const claudeUuid = staleSession.claude_session_id!;
   const task = staleSession.task;
 
-  console.log(`  Resuming crashed session ${sessionId} (Claude session ${claudeUuid})`);
+  // Per-session circuit breaker: don't resume sessions that keep crashing
+  const resumeCount = (db.prepare(`
+    SELECT COUNT(*) as cnt FROM events WHERE session_id = ? AND type = 'session_resume'
+  `).get(sessionId) as { cnt: number })?.cnt || 0;
+  if (resumeCount >= MAX_SESSION_RESUMES) {
+    console.warn(`  [SESSION CIRCUIT BREAKER] Session ${sessionId} already resumed ${resumeCount} times — marking as failed to prevent crash loop`);
+    db.prepare(`
+      UPDATE sessions SET status = 'failed', exit_code = -1, completed_at = datetime('now'), updated_at = datetime('now')
+      WHERE id = ?
+    `).run(sessionId);
+    return;
+  }
+
+  console.log(`  Resuming crashed session ${sessionId} (Claude session ${claudeUuid}, attempt ${resumeCount + 1}/${MAX_SESSION_RESUMES})`);
 
   const preSpawnFiles = snapshotClaudeSessionFiles(projectPath);
   const worker = await forkWorker();
