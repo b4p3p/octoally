@@ -560,6 +560,18 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       if (termRef.current && connectFnRef.current) {
         termRef.current.reset();
         connectFnRef.current();
+        // For Codex: raw replay buffer contains garbled chunks from different widths.
+        // After reconnect settles, trigger a capture-pane refresh for clean display.
+        if (cliType === 'codex') {
+          setTimeout(() => {
+            const term = termRef.current;
+            const w = wsRef.current;
+            if (term && w && w.readyState === WebSocket.OPEN) {
+              term.reset();
+              w.send(JSON.stringify({ type: 'refresh' }));
+            }
+          }, 500);
+        }
       }
     }
   }, [suspended]);
