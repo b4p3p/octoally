@@ -1203,6 +1203,17 @@ export function requestCapture(sessionId: string, ws: WebSocket): Promise<void> 
         // Convert \n to \r\n for xterm.js — bare \n causes staircase (LF without CR)
         const converted = stdout.replace(/\r?\n/g, '\r\n');
         captureCache.set(sessionId, { data: converted, ts: Date.now() });
+
+        // Replace the replay buffer with this clean capture — prevents stale
+        // raw chunks (recorded at different widths) from being replayed on
+        // future reconnects and causing duplicated/garbled content.
+        const active = activeSessions.get(sessionId);
+        if (active) {
+          active.replayBuffer.length = 0;
+          active.replayBuffer.push(converted);
+          active.replayBytes = converted.length;
+        }
+
         try {
           ws.send(JSON.stringify({
             type: 'output',
