@@ -599,8 +599,6 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   }, [hideCursor]);
 
   // Re-focus and refit terminal when it becomes visible
-  const prevColsRef = useRef(0);
-  const prevRowsRef = useRef(0);
   useEffect(() => {
     if (visible && !suspended && termRef.current) {
       termRef.current.scrollToBottom();
@@ -611,12 +609,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         const w = wsRef.current;
         if (fit && term) {
           fit.fit();
-          // Only send resize if dimensions actually changed — prevents
-          // Codex (and other TUIs) from redrawing unnecessarily on tab switch
-          const changed = term.cols !== prevColsRef.current || term.rows !== prevRowsRef.current;
-          prevColsRef.current = term.cols;
-          prevRowsRef.current = term.rows;
-          if (changed && !passiveResizeRef.current && w && w.readyState === WebSocket.OPEN) {
+          if (!passiveResizeRef.current && w && w.readyState === WebSocket.OPEN) {
             w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
           }
           term.scrollToBottom();
@@ -718,11 +711,19 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       const fit = fitRef.current;
       if (fit) fit.fit();
       const w = wsRef.current;
-      if (w && w.readyState === WebSocket.OPEN) {
+      if (!w || w.readyState !== WebSocket.OPEN) {
+        term.reset();
+        disconnectFnRef.current?.();
+        setTimeout(() => connectFnRef.current?.(), 50);
+      } else if (cliType === 'codex') {
         term.reset();
         w.send(JSON.stringify({ type: 'refresh' }));
+      } else if (hideCursorRef.current) {
+        const cols = term.cols;
+        const rows = term.rows;
+        w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
+        setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols, rows })), 100);
       } else {
-        // WebSocket not open — full reconnect
         term.reset();
         disconnectFnRef.current?.();
         setTimeout(() => connectFnRef.current?.(), 50);
@@ -730,7 +731,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     };
     window.addEventListener('octoally:refresh-terminal', handler);
     return () => window.removeEventListener('octoally:refresh-terminal', handler);
-  }, [sessionId]);
+  }, [sessionId, cliType]);
 
   // Focus terminal on demand (e.g. switching from grid to single view)
   useEffect(() => {
@@ -773,12 +774,23 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                 const fit = fitRef.current;
                 if (!term) return;
                 if (fit) fit.fit();
-                if (w && w.readyState === WebSocket.OPEN) {
-                  // WebSocket is open — request capture-pane refresh from server
+                if (!w || w.readyState !== WebSocket.OPEN) {
+                  // WebSocket not open — full reconnect
+                  term.reset();
+                  disconnectFnRef.current?.();
+                  setTimeout(() => connectFnRef.current?.(), 50);
+                } else if (cliType === 'codex') {
+                  // Codex: capture-pane refresh (Codex doesn't redraw on SIGWINCH)
                   term.reset();
                   w.send(JSON.stringify({ type: 'refresh' }));
+                } else if (hideCursorRef.current) {
+                  // Claude hivemind/agent: resize-toggle forces SIGWINCH redraw
+                  const cols = term.cols;
+                  const rows = term.rows;
+                  w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
+                  setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols, rows })), 100);
                 } else {
-                  // WebSocket is not open — do a full reconnect which replays output
+                  // Plain terminal: reconnect for fresh replay
                   term.reset();
                   disconnectFnRef.current?.();
                   setTimeout(() => connectFnRef.current?.(), 50);
