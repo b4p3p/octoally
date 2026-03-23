@@ -269,32 +269,26 @@ if (!isInstalled()) {
 
   // Launch desktop app if installed and not running
   if (!args.length || args[0] === "start") {
-    let desktopRunning = false;
     if (process.platform === "linux") {
-      try { execSync('pgrep -f "octoally-desktop"', { stdio: "pipe" }); desktopRunning = true; } catch {}
-    } else if (process.platform === "darwin") {
-      try { execSync('pgrep -f "OctoAlly"', { stdio: "pipe" }); desktopRunning = true; } catch {}
-    }
-
-    if (!desktopRunning) {
-      if (process.platform === "linux") {
-        let desktopBin = null;
-        try {
-          desktopBin = execSync("which octoally-desktop 2>/dev/null", { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-        } catch {}
-        if (!desktopBin) {
-          desktopBin = ["/usr/bin/octoally-desktop", "/opt/OctoAlly/octoally-desktop"]
-            .find((p) => existsSync(p)) || null;
-        }
+      let desktopRunning = false;
+      try { execSync('pgrep -f "[o]ctoally-desktop"', { stdio: "pipe" }); desktopRunning = true; } catch {}
+      if (!desktopRunning) {
+        const desktopBin = ["/usr/bin/octoally-desktop", "/opt/OctoAlly/octoally-desktop"]
+          .find((p) => existsSync(p));
         if (desktopBin) {
           log(CYAN, "Launching desktop app...");
-          try {
-            execSync(`nohup "${desktopBin}" >/dev/null 2>&1 &`, { stdio: "pipe" });
-          } catch (err) {
-            log(YELLOW, `Desktop app launch failed: ${err.message}`);
-          }
+          const desktop = spawn(desktopBin, [], {
+            stdio: "ignore",
+            detached: true,
+            env: { ...process.env, DISPLAY: process.env.DISPLAY || ":0" },
+          });
+          desktop.unref();
         }
-      } else if (process.platform === "darwin" && existsSync("/Applications/OctoAlly.app")) {
+      }
+    } else if (process.platform === "darwin") {
+      let desktopRunning = false;
+      try { execSync('pgrep -f "[O]ctoAlly"', { stdio: "pipe" }); desktopRunning = true; } catch {}
+      if (!desktopRunning && existsSync("/Applications/OctoAlly.app")) {
         log(CYAN, "Launching desktop app...");
         try { execSync('open -a OctoAlly', { stdio: "pipe" }); } catch {}
       }
