@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   # Build the server + dashboard archive (platform-independent)
@@ -120,15 +121,17 @@ jobs:
             release-assets/desktop-macos/*.dmg
           fail_on_unmatched_files: false
 
-      # Publish to npm (only when NPM_PUBLISH variable is set to "true")
+      # Publish to npm via OIDC trusted publishing (no token needed)
+      - name: Setup Node for npm publish
+        if: vars.NPM_PUBLISH == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
       - name: Publish to npm
         if: vars.NPM_PUBLISH == 'true'
-        run: |
-          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > .npmrc
-          npm publish
-          rm -f .npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
 
       - name: Reset NPM_PUBLISH flag
         if: vars.NPM_PUBLISH == 'true'
