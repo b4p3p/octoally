@@ -13,8 +13,8 @@
   <a href="https://github.com/ai-genius-automations/octoally/stargazers"><img src="https://img.shields.io/github/stars/ai-genius-automations/octoally?style=flat&color=gold" alt="GitHub Stars"></a>
   <a href="https://github.com/ai-genius-automations/octoally/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0%20+%20Commons%20Clause-blue" alt="License"></a>
   <a href="https://github.com/ai-genius-automations/octoally/releases"><img src="https://img.shields.io/github/v/release/ai-genius-automations/octoally?color=green" alt="Release"></a>
-  <a href="https://aigeniusautomations.com"><img src="https://img.shields.io/badge/by-AI%20Genius%20Automations-purple" alt="AI Genius Automations"></a>
   <a href="https://octoally.com"><img src="https://img.shields.io/badge/website-octoally.com-blue" alt="Website"></a>
+  <a href="https://aigeniusautomations.com"><img src="https://img.shields.io/badge/by-AI%20Genius%20Automations-purple" alt="AI Genius Automations"></a>
 </p>
 
 ---
