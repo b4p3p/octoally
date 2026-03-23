@@ -12,7 +12,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
   # Build the server + dashboard archive (platform-independent)
@@ -121,19 +120,14 @@ jobs:
             release-assets/desktop-macos/*.dmg
           fail_on_unmatched_files: false
 
-      # Publish to npm via OIDC trusted publishing (requires npm 11.5.1+)
-      # Do NOT use setup-node with registry-url — it sets NODE_AUTH_TOKEN
-      # which blocks OIDC fallback. Node is already set up from earlier steps.
-      - name: Upgrade npm for OIDC support
-        if: vars.NPM_PUBLISH == 'true'
-        run: sudo npm install -g npm@latest
-
+      # Publish to npm using granular access token
       - name: Publish to npm
         if: vars.NPM_PUBLISH == 'true'
         run: |
-          unset NODE_AUTH_TOKEN
-          npm config delete //registry.npmjs.org/:_authToken 2>/dev/null || true
-          npm publish --provenance --access public
+          npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
+          npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Reset NPM_PUBLISH flag
         if: vars.NPM_PUBLISH == 'true'
