@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // OctoAlly CLI — thin npm wrapper
-// Delegates install/update to install.sh (single source of truth).
-// Only handles version detection and launching.
+// Version check + launch. Delegates install/update to install.sh.
+// Re-entrancy guard prevents recursive loops when install.sh invokes `octoally`.
 
 import { execSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -9,6 +9,29 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
+
+// ── Re-entrancy guard ────────────────────────────────────────────────────────
+// install.sh may call `octoally` commands (start, status, etc.) during
+// install/update. If npx is in PATH, those resolve to THIS script instead of
+// bin/octoally. The guard detects this and proxies directly to the real CLI.
+if (process.env.__OCTOALLY_NPX_ACTIVE === "1") {
+  const installDir = process.env.OCTOALLY_INSTALL_DIR || join(homedir(), "octoally");
+  const localCli = join(installDir, "bin", "octoally");
+  if (existsSync(localCli)) {
+    const child = spawn(localCli, process.argv.slice(2), {
+      stdio: "inherit",
+      cwd: installDir,
+    });
+    child.on("exit", (code) => process.exit(code ?? 0));
+    child.on("error", () => process.exit(1));
+  } else {
+    process.exit(0);
+  }
+  // Stop execution — the spawn handles everything.
+  await new Promise(() => {});
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
 
 const INSTALL_DIR = process.env.OCTOALLY_INSTALL_DIR || join(homedir(), "octoally");
 const GITHUB_REPO = "ai-genius-automations/octoally";
@@ -30,29 +53,20 @@ function isInstalled() {
   return existsSync(LOCAL_CLI) && existsSync(join(INSTALL_DIR, "server", "dist"));
 }
 
-/** Read the npm package version (baked into this wrapper at publish time). */
 function getPackageVersion() {
   try {
     const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "package.json");
-    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
-    return pkg.version || null;
-  } catch {
-    return null;
-  }
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version || null;
+  } catch { return null; }
 }
 
-/** Read the locally installed version from ~/octoally/version.json. */
 function getLocalVersion() {
   try {
-    const versionFile = join(INSTALL_DIR, "version.json");
-    const data = JSON.parse(readFileSync(versionFile, "utf8"));
+    const data = JSON.parse(readFileSync(join(INSTALL_DIR, "version.json"), "utf8"));
     return data.version || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/** Compare two semver strings. Returns true if a > b. */
 function isNewer(a, b) {
   if (!a || !b) return false;
   const pa = a.split(".").map(Number);
@@ -74,16 +88,16 @@ async function promptYesNo(question) {
   return answer.toLowerCase() !== "n";
 }
 
-/**
- * Run install.sh — handles both fresh install and upgrade.
- * install.sh is the single source of truth for all install/update logic
- * including server, dashboard, desktop app, migrations, and service restart.
- */
+/** Run install.sh with the re-entrancy guard set. */
 function runInstaller() {
   log(CYAN, "Running OctoAlly installer...\n");
   execSync(`bash -c "$(curl -fsSL ${INSTALL_SCRIPT_URL})"`, {
     stdio: "inherit",
-    env: { ...process.env, OCTOALLY_INSTALL_DIR: INSTALL_DIR },
+    env: {
+      ...process.env,
+      OCTOALLY_INSTALL_DIR: INSTALL_DIR,
+      __OCTOALLY_NPX_ACTIVE: "1",
+    },
   });
 }
 
@@ -104,7 +118,7 @@ function proxyCommand(args) {
 const args = process.argv.slice(2);
 const command = args[0] || "";
 
-// Explicit --install or --update flag → run installer
+// Explicit --install or --update → run installer directly
 if (command === "--install" || command === "install" || command === "--update") {
   try {
     runInstaller();
@@ -115,16 +129,13 @@ if (command === "--install" || command === "install" || command === "--update") 
   process.exit(0);
 }
 
-// ── Not installed → run installer, then launch ──────────────────────────────
+// ── Not installed → install, then launch ─────────────────────────────────────
 
 if (!isInstalled()) {
   log(YELLOW, "OctoAlly is not installed yet.");
   if (await promptYesNo("Install OctoAlly?")) {
     try {
       runInstaller();
-      if (isInstalled()) {
-        proxyCommand(args.length ? args : ["start"]);
-      }
     } catch (err) {
       log(RED, `Installation failed: ${err.message}`);
       process.exit(1);
@@ -132,8 +143,12 @@ if (!isInstalled()) {
   } else {
     process.exit(0);
   }
+  // After install, launch if it succeeded
+  if (isInstalled()) {
+    proxyCommand(args.length ? args : ["start"]);
+  }
 } else {
-  // ── Installed → check for updates, then launch ───────────────────────────
+  // ── Installed → check for update, then launch ─────────────────────────────
 
   const packageVersion = getPackageVersion();
   const localVersion = getLocalVersion();
@@ -150,6 +165,5 @@ if (!isInstalled()) {
     }
   }
 
-  // Default: launch the app
   proxyCommand(args.length ? args : ["start"]);
 }
