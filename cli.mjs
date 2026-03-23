@@ -148,11 +148,14 @@ function runUpdate(version) {
     const debFile = `/tmp/octoally-desktop_${version}_amd64.deb`;
     log(CYAN, "Updating desktop app...");
     execSync(`curl -fsSL -o "${debFile}" "${debUrl}"`, { stdio: "pipe" });
-    // Kill running desktop app before dpkg replaces the binary
+    // Force-kill running desktop app before dpkg replaces the binary
     try {
-      execSync('pkill -f "octoally-desktop"', { stdio: "pipe" });
-      execSync("sleep 1", { stdio: "pipe" });
       execSync('pkill -9 -f "octoally-desktop"', { stdio: "pipe" });
+      // Wait until process is actually dead
+      for (let i = 0; i < 10; i++) {
+        try { execSync('pgrep -f "octoally-desktop"', { stdio: "pipe" }); } catch { break; }
+        execSync("sleep 0.5", { stdio: "pipe" });
+      }
     } catch {}
     execSync(`sudo dpkg -i "${debFile}"`, { stdio: "inherit" });
     execSync(`rm -f "${debFile}"`, { stdio: "pipe" });
