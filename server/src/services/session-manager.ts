@@ -1189,17 +1189,15 @@ export function requestCapture(sessionId: string, ws: WebSocket): Promise<void> 
     return Promise.resolve();
   }
 
-  const isCodex = activeSessions.get(sessionId)?.cliType === 'codex';
-  tlog(`[CAPTURE] ${sessionId}: requesting (spawn, codex=${isCodex})`);
+  tlog(`[CAPTURE] ${sessionId}: requesting (spawn)`);
   const name = tmuxSessionName(sessionId);
   return new Promise((resolve) => {
     const chunks: string[] = [];
-    // For Codex TUI sessions, only capture the visible pane (no -S -).
-    // Codex redraws on resize accumulate in tmux scrollback, and -S - would
-    // capture all those stale redraws, producing duplicate output.
+    // Always use -S - to capture full scrollback history. Duplicate output
+    // from Codex redraws is prevented on the client side by skipping the
+    // force-resize trick for Codex sessions (Terminal.tsx).
     const captureArgs = [
-      ...tmuxArgsForSession(sessionId), 'capture-pane', '-t', name, '-p', '-e', '-T',
-      ...(isCodex ? [] : ['-S', '-']),
+      ...tmuxArgsForSession(sessionId), 'capture-pane', '-t', name, '-p', '-e', '-T', '-S', '-',
     ];
     const proc = spawn('tmux', captureArgs, { stdio: ['ignore', 'pipe', 'ignore'] });
 
