@@ -166,6 +166,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   passiveResizeRef.current = passiveResize;
   const hideCursorRef = useRef(hideCursor);
   hideCursorRef.current = hideCursor;
+  const cliTypeRef = useRef(cliType);
+  cliTypeRef.current = cliType;
+  // Debounce timer for Codex capture-pane refreshes — prevents multiple
+  // effects (suspension + visible) from stacking duplicate captures.
+  const codexRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   isSuspendedRef.current = suspended;
 
   useEffect(() => {
@@ -367,7 +372,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         // Only for hivemind sessions (hideCursor=true) where ruflo redraws
         // on SIGWINCH. Plain terminals (bash) don't redraw old output, so
         // force-resize just corrupts the tmux pane history via lossy reflow.
-        if (!passiveResizeRef.current && hideCursorRef.current) {
+        // SKIP for Codex: Codex TUI redraws accumulate in tmux scrollback,
+        // causing capture-pane to show duplicate output.
+        if (!passiveResizeRef.current && hideCursorRef.current && cliTypeRef.current !== 'codex') {
           const cols = term.cols;
           const rows = term.rows;
           setTimeout(() => {
@@ -562,8 +569,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         connectFnRef.current();
         // For Codex: raw replay buffer contains garbled chunks from different widths.
         // After reconnect settles, trigger a capture-pane refresh for clean display.
+        // Use debounced timer so visible effect's refresh doesn't stack with this one.
         if (cliType === 'codex') {
-          setTimeout(() => {
+          if (codexRefreshTimer.current) clearTimeout(codexRefreshTimer.current);
+          codexRefreshTimer.current = setTimeout(() => {
+            codexRefreshTimer.current = null;
             const term = termRef.current;
             const w = wsRef.current;
             if (term && w && w.readyState === WebSocket.OPEN) {
@@ -628,13 +638,16 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
             w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
             // Codex: after resize, send capture-pane refresh for correct display.
             // Raw replay chunks from different widths render garbled for Codex.
+            // Debounced so it doesn't stack with the suspension effect's refresh.
             if (cliType === 'codex') {
-              setTimeout(() => {
+              if (codexRefreshTimer.current) clearTimeout(codexRefreshTimer.current);
+              codexRefreshTimer.current = setTimeout(() => {
+                codexRefreshTimer.current = null;
                 if (!cancelled && w.readyState === WebSocket.OPEN) {
                   term.reset();
                   w.send(JSON.stringify({ type: 'refresh' }));
                 }
-              }, 300);
+              }, 500);
             }
           }
           term.scrollToBottom();

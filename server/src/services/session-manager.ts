@@ -117,6 +117,7 @@ interface ActiveSession {
   seq: number; // monotonic counter for pty_output rows
   cols: number; // last known terminal column width
   task: string; // 'Terminal' for plain shells, task description for hivemind
+  cliType?: 'claude' | 'codex'; // CLI type — Codex needs special capture handling
   externalSocket?: string; // external hivemind dtach socket (adopted sessions)
   replayBuffer: string[];  // ring buffer of recent output chunks for instant replay
   replayBytes: number;     // total bytes in replayBuffer
@@ -871,6 +872,7 @@ export async function spawnClaudeFlow(sessionId: string, projectPath: string, ta
   const active = wireWorker(sessionId, worker, projectPath, preSpawnFiles);
   active.cols = cols;
   active.task = task;
+  active.cliType = cliType;
 
   const rufloCommand = cliType === 'codex'
     ? getSetting('hivemind_codex_command') || getSetting('ruflo_command')
@@ -932,6 +934,7 @@ export async function spawnAgent(sessionId: string, projectPath: string, task: s
   const active = wireWorker(sessionId, worker, projectPath, preSpawnFiles);
   active.cols = cols;
   active.task = `Agent (${agentType}): ${task}`;
+  active.cliType = cliType;
 
   const rufloCommand = cliType === 'codex'
     ? getSetting('agent_codex_command') || getSetting('ruflo_command')
@@ -991,6 +994,7 @@ export async function reconnectSession(sessionId: string, opts?: { skipPipePaneR
     tlog(`[RECONNECT] ${sessionId}: wireWorker=${Date.now() - t2}ms`);
     active.cols = session.terminal_cols || 120;
     active.task = session.task || '';
+    active.cliType = ((session as any).cli_type === 'codex' ? 'codex' : 'claude') as 'claude' | 'codex';
 
     // Restore externalSocket for adopted sessions (persisted in DB column)
     if ((session as any).external_socket) {
@@ -1185,13 +1189,19 @@ export function requestCapture(sessionId: string, ws: WebSocket): Promise<void> 
     return Promise.resolve();
   }
 
-  tlog(`[CAPTURE] ${sessionId}: requesting (spawn)`);
+  const isCodex = activeSessions.get(sessionId)?.cliType === 'codex';
+  tlog(`[CAPTURE] ${sessionId}: requesting (spawn, codex=${isCodex})`);
   const name = tmuxSessionName(sessionId);
   return new Promise((resolve) => {
     const chunks: string[] = [];
-    const proc = spawn('tmux', [
-      ...tmuxArgsForSession(sessionId), 'capture-pane', '-t', name, '-p', '-e', '-T', '-S', '-',
-    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    // For Codex TUI sessions, only capture the visible pane (no -S -).
+    // Codex redraws on resize accumulate in tmux scrollback, and -S - would
+    // capture all those stale redraws, producing duplicate output.
+    const captureArgs = [
+      ...tmuxArgsForSession(sessionId), 'capture-pane', '-t', name, '-p', '-e', '-T',
+      ...(isCodex ? [] : ['-S', '-']),
+    ];
+    const proc = spawn('tmux', captureArgs, { stdio: ['ignore', 'pipe', 'ignore'] });
 
     proc.stdout!.setEncoding('utf8');
     proc.stdout!.on('data', (chunk: string) => chunks.push(chunk));
@@ -1877,6 +1887,7 @@ async function resumeCrashedSession(staleSession: Session, projectPath: string):
 
   // Tell worker to spawn a hivemind session
   const sessionCliType = (staleSession as any).cli_type === 'codex' ? 'codex' as const : 'claude' as const;
+  active.cliType = sessionCliType;
   const rufloCommand = sessionCliType === 'codex'
     ? getSetting('hivemind_codex_command') || getSetting('ruflo_command')
     : getSetting('hivemind_claude_command') || getSetting('ruflo_command');
