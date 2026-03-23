@@ -113,12 +113,12 @@
 ### Install
 
 ```bash
-npx octoally
+npx octoally@latest
 ```
 
-This will clone the repo, install dependencies, build, and start the server. On subsequent runs it proxies to the local CLI.
+Installs OctoAlly, starts the server, and launches the desktop app. On subsequent runs, automatically updates if a new version is available.
 
-> **Custom install location:** `OCTOALLY_INSTALL_DIR=/opt/octoally npx octoally`
+> **Custom install location:** `OCTOALLY_INSTALL_DIR=/opt/octoally npx octoally@latest`
 
 ### What you get
 
