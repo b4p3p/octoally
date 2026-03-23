@@ -129,9 +129,3 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Reset NPM_PUBLISH flag
-        if: vars.NPM_PUBLISH == 'true'
-        continue-on-error: true
-        run: gh variable set NPM_PUBLISH --body "false"
-        env:
-          GH_TOKEN: ${{ github.token }}
