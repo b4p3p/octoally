@@ -245,12 +245,15 @@ if (!isInstalled()) {
       execSync('pgrep -f "octoally-desktop"', { stdio: "pipe" });
       // Already running — do nothing
     } catch {
-      // Not running — try to launch if installed
-      try {
-        execSync("command -v octoally-desktop", { stdio: "pipe" });
-        const desktop = spawn("octoally-desktop", [], { stdio: "ignore", detached: true });
-        desktop.unref();
-      } catch {}
+      // Not running — try to launch if binary exists
+      const desktopBin = ["/usr/bin/octoally-desktop", "/opt/OctoAlly/octoally-desktop"]
+        .find((p) => existsSync(p));
+      if (desktopBin) {
+        try {
+          const desktop = spawn(desktopBin, [], { stdio: "ignore", detached: true });
+          desktop.unref();
+        } catch {}
+      }
     }
   }
 
