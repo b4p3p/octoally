@@ -225,7 +225,7 @@ async function start() {
   // Return the update command — the dashboard handles copy-to-clipboard.
   app.get('/api/update-command', async () => {
     return {
-      command: 'curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/octoally/main/scripts/install.sh | bash',
+      command: 'npx octoally',
     };
   });
 

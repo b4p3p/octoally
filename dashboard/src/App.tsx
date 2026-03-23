@@ -143,7 +143,7 @@ function Dashboard() {
   // Copy update command to clipboard and show brief confirmation.
   const [updateCopied, setUpdateCopied] = useState(false);
   const triggerUpdate = useCallback(async () => {
-    const cmd = 'curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/octoally/main/scripts/install.sh | bash';
+    const cmd = 'npx octoally';
     try {
       await navigator.clipboard.writeText(cmd);
       setUpdateCopied(true);
