@@ -63,7 +63,7 @@ cmd_start() {
   log_info "Starting OctoAlly server..."
   mkdir -p "$OCTOALLY_DIR/logs"
   cd "$OCTOALLY_DIR/server"
-  NODE_ENV=production node dist/index.js >> "$OCTOALLY_DIR/logs/octoally.log" 2>&1 &
+  env NODE_ENV=production node dist/index.js >> "$OCTOALLY_DIR/logs/octoally.log" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
   log_ok "OctoAlly started (PID $pid)"
@@ -323,7 +323,7 @@ cmd_logs() {
   else
     log_info "Starting server in foreground (Ctrl+C to stop)..."
     cd "$OCTOALLY_DIR/server"
-    NODE_ENV=production node dist/index.js
+    env NODE_ENV=production node dist/index.js
   fi
 }
 

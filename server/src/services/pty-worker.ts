@@ -19,6 +19,13 @@ import type { ReadStream } from 'fs';
 
 const execFileAsync = promisify(execFile);
 
+/** Build a clean env for user-facing sessions: strip NODE_ENV so the server's
+ *  production mode doesn't leak into user terminals / Claude Code / dev servers. */
+function sessionEnv(): Record<string, string> {
+  const { NODE_ENV, ...rest } = process.env;
+  return { ...rest, TERM: 'xterm-256color', OCTOALLY_SESSION: '1', HIVECOMMAND_SESSION: '1', HEADLESS_WORKERS_DISABLED: '1' };
+}
+
 const TIMING_LOG = '/tmp/octoally-timing.log';
 function tlog(s: string): void {
   try { appendFileSync(TIMING_LOG, `[${new Date().toISOString()}] ${s}\n`); } catch {}
@@ -122,7 +129,7 @@ async function tmuxCreate(
     ...runArgs,
   ], {
     cwd: projectPath,
-    env: { ...process.env, TERM: 'xterm-256color', OCTOALLY_SESSION: '1', HIVECOMMAND_SESSION: '1', HEADLESS_WORKERS_DISABLED: '1' } as Record<string, string>,
+    env: sessionEnv(),
   });
 
   try {
@@ -177,7 +184,7 @@ async function dtachCreate(sessionId: string, projectPath: string, command: stri
     '-n', sock, '-Ez', shell, '-i', '-c', command,
   ], {
     cwd: projectPath,
-    env: { ...process.env, TERM: 'xterm-256color', OCTOALLY_SESSION: '1', HIVECOMMAND_SESSION: '1', HEADLESS_WORKERS_DISABLED: '1' } as Record<string, string>,
+    env: sessionEnv(),
   });
 }
 
@@ -380,19 +387,19 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
         }
         ptyProcess = pty.spawn('tmux', [...tmuxBaseArgs, 'attach-session', '-t', tmuxSessionName(msg.sessionId)], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       } else if (msg.useDtach) {
         await dtachCreate(msg.sessionId, msg.projectPath, shell);
         await new Promise(r => setTimeout(r, 100));
         ptyProcess = pty.spawn(shell, ['-c', `dtach -a ${dtachSocket(msg.sessionId)} -Ez`], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       } else {
         ptyProcess = pty.spawn(shell, ['-i'], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       }
     } else if (msg.mode === 'agent' && msg.agentType) {
@@ -408,19 +415,19 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
         }
         ptyProcess = pty.spawn('tmux', [...tmuxBaseArgs, 'attach-session', '-t', tmuxSessionName(msg.sessionId)], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       } else if (msg.useDtach) {
         await dtachCreate(msg.sessionId, msg.projectPath, command);
         await new Promise(r => setTimeout(r, 100));
         ptyProcess = pty.spawn(shell, ['-c', `dtach -a ${dtachSocket(msg.sessionId)} -Ez`], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       } else {
         ptyProcess = pty.spawn(shell, ['-i', '-c', command], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       }
     } else {
@@ -436,7 +443,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
         }
         ptyProcess = pty.spawn('tmux', [...tmuxBaseArgs, 'attach-session', '-t', tmuxSessionName(msg.sessionId)], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       } else if (msg.useDtach) {
         const command = buildHiveMindCommand(msg.task, false, rufloCmd, cliType);
@@ -444,13 +451,13 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
         await new Promise(r => setTimeout(r, 100));
         ptyProcess = pty.spawn(shell, ['-c', `dtach -a ${dtachSocket(msg.sessionId)} -Ez`], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       } else {
         const command = buildHiveMindCommand(msg.task, false, rufloCmd, cliType);
         ptyProcess = pty.spawn(shell, ['-i', '-c', command], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-          env: { ...process.env } as Record<string, string>,
+          env: sessionEnv(),
         });
       }
     }
@@ -495,14 +502,14 @@ async function handleReconnect(msg: ReconnectMessage): Promise<void> {
       const t3 = Date.now();
       ptyProcess = pty.spawn('tmux', [...serverArgs, 'attach-session', '-t', tmuxSessionName(msg.sessionId)], {
         name: 'xterm-256color', cols: msg.cols, rows: msg.rows,
-        env: { ...process.env } as Record<string, string>,
+        env: sessionEnv(),
       });
       log(`[PTY-WORKER] ${msg.sessionId}: pty_spawn=${Date.now()-t3}ms`);
     } else {
       const shell = process.env.SHELL || '/bin/bash';
       ptyProcess = pty.spawn(shell, ['-c', `dtach -a ${dtachSocket(msg.sessionId)} -Ez`], {
         name: 'xterm-256color', cols: msg.cols, rows: msg.rows,
-        env: { ...process.env } as Record<string, string>,
+        env: sessionEnv(),
       });
     }
 
@@ -534,13 +541,13 @@ async function handleAdopt(msg: AdoptMessage): Promise<void> {
       }
       ptyProcess = pty.spawn('tmux', [...tmuxBaseArgs, 'attach-session', '-t', tmuxSessionName(msg.sessionId)], {
         name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-        env: { ...process.env } as Record<string, string>,
+        env: sessionEnv(),
       });
     } else {
       const shell = process.env.SHELL || '/bin/bash';
       ptyProcess = pty.spawn(shell, ['-c', `dtach -a ${msg.socketPath} -r none -Ez`], {
         name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
-        env: { ...process.env } as Record<string, string>,
+        env: sessionEnv(),
       });
     }
 

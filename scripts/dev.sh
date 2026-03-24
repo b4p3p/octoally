@@ -78,7 +78,7 @@ restore_service() {
   elif [ -n "$PID_WAS_RUNNING" ]; then
     log_info "Restarting octoally in background..."
     cd "$OCTOALLY_DIR/server"
-    NODE_ENV=production node dist/index.js &
+    env NODE_ENV=production node dist/index.js &
     local new_pid=$!
     echo "$new_pid" > "$OCTOALLY_DIR/.octoally.pid"
     log_ok "Restored (PID $new_pid)"
