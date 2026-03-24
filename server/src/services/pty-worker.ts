@@ -121,7 +121,13 @@ async function tmuxCreate(
   }
 
   const shell = process.env.SHELL || '/bin/bash';
-  const runArgs = command ? [shell, '-i', '-c', command] : [shell];
+  // Wrap the shell invocation with env -u NODE_ENV to strip it before the shell starts,
+  // since tmux new-session -d inherits from the tmux server's env, not the client's.
+  const envCmd = 'env';
+  const envArgs = ['-u', 'NODE_ENV'];
+  const runArgs = command
+    ? [envCmd, ...envArgs, shell, '-i', '-c', command]
+    : [envCmd, ...envArgs, shell, '-i'];
 
   await execFileAsync('tmux', [
     ...tmuxBaseArgs, 'new-session', '-d', '-s', name,
@@ -131,6 +137,11 @@ async function tmuxCreate(
     cwd: projectPath,
     env: sessionEnv(),
   });
+
+  try {
+    // Also strip NODE_ENV from the tmux server's global env for any future windows/panes
+    await execFileAsync('tmux', [...tmuxBaseArgs, 'set-environment', '-g', '-u', 'NODE_ENV']);
+  } catch { /* best effort */ }
 
   try {
     await execFileAsync('tmux', [...tmuxBaseArgs, 'set-option', '-s', 'terminal-overrides', 'xterm-256color:smcup@:rmcup@']);
