@@ -1,0 +1,120 @@
+name: Test macOS Hook Fix
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OctoAlly version to test (e.g. 1.0.54 or latest)'
+        required: false
+        default: 'latest'
+
+jobs:
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Install OctoAlly
+        run: |
+          npx -y octoally@${{ github.event.inputs.version }} &
+          INSTALL_PID=$!
+          # Wait for install to complete (server starts in background)
+          sleep 30
+          kill $INSTALL_PID 2>/dev/null || true
+
+      - name: Check OctoAlly version
+        run: |
+          echo "=== Server version ==="
+          cat ~/octoally/server/package.json | grep version | head -1
+          echo ""
+          echo "=== Server dist exists ==="
+          ls ~/octoally/server/dist/index.js && echo "YES" || echo "NO"
+
+      - name: Check ruflo install
+        run: |
+          echo "=== Ruflo binary ==="
+          ls -la ~/.octoally/ruflo/node_modules/.bin/ruflo 2>/dev/null || echo "NOT FOUND at .octoally"
+          ls -la ~/.hivecommand/ruflo/node_modules/.bin/ruflo 2>/dev/null || echo "NOT FOUND at .hivecommand"
+
+      - name: Check for stale agentdb
+        run: |
+          echo "=== Stale agentdb in ruflo install ==="
+          find ~/.octoally/ruflo/node_modules -name "package.json" -path "*/agentdb/*" 2>/dev/null | while read f; do
+            echo "$f: $(grep '"version"' "$f" | head -1)"
+          done || echo "None found"
+
+          echo ""
+          echo "=== Stale npx caches ==="
+          for dir in ~/.npm/_npx/*/; do
+            [ -d "$dir" ] || continue
+            if [ -f "${dir}node_modules/@claude-flow/cli/package.json" ]; then
+              echo "FOUND claude-flow cache: $dir"
+              ls "${dir}node_modules/agentdb/package.json" 2>/dev/null && echo "  HAS STALE AGENTDB" || echo "  no standalone agentdb"
+            fi
+          done || echo "No npx caches"
+
+      - name: Simulate ruflo init and check hooks
+        run: |
+          # Create a test project
+          mkdir -p ~/test-project
+          cd ~/test-project
+
+          echo "=== Running ruflo init ==="
+          if [ -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then
+            ~/.octoally/ruflo/node_modules/.bin/ruflo init --force 2>&1 | tail -20 || echo "ruflo init failed"
+          else
+            echo "No ruflo binary available"
+            exit 0
+          fi
+
+          echo ""
+          echo "=== Stop hooks in settings.json ==="
+          if [ -f .claude/settings.json ]; then
+            python3 -c "
+import json
+with open('.claude/settings.json') as f:
+    s = json.load(f)
+hooks = s.get('hooks', {})
+for key in ['Stop', 'SessionEnd']:
+    for entry in hooks.get(key, []):
+        for h in entry.get('hooks', []):
+            cmd = h.get('command', '')
+            timeout = h.get('timeout', 'NONE')
+            print(f'[{key}] timeout={timeout} command={cmd[:120]}')
+" || echo "Failed to parse settings.json"
+          else
+            echo "No settings.json created"
+          fi
+
+          echo ""
+          echo "=== session-end.sh content ==="
+          cat .claude/hooks/session-end.sh 2>/dev/null || echo "No session-end.sh"
+
+      - name: Test ruflo hooks session-end execution
+        run: |
+          if [ ! -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then
+            echo "No ruflo binary, skipping"
+            exit 0
+          fi
+
+          cd ~/test-project
+          echo "=== Testing ruflo hooks session-end (5s timeout) ==="
+          gtimeout 5 ~/.octoally/ruflo/node_modules/.bin/ruflo hooks session-end --generate-summary true --persist-state true --export-metrics true 2>&1 && echo "EXIT: $?" || echo "EXIT: $? (likely timeout)"
+
+      - name: Start server and check migration logs
+        run: |
+          cd ~/octoally
+          # Add a test project to the DB first
+          timeout 10 node -e "
+            const Database = require('better-sqlite3');
+            const path = require('path');
+            const os = require('os');
+            const dbPath = path.join(os.homedir(), '.octoally', 'octoally.db');
+            try {
+              const db = new Database(dbPath);
+              db.exec('CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT, path TEXT, description TEXT, ruflo_prompt TEXT, openclaw_prompt TEXT, default_web_url TEXT, created_at TEXT DEFAULT (datetime(\"now\")), updated_at TEXT DEFAULT (datetime(\"now\")))');
+              db.prepare('INSERT OR IGNORE INTO projects (id, name, path) VALUES (?, ?, ?)').run('test1', 'test-project', path.join(os.homedir(), 'test-project'));
+              console.log('Test project added to DB');
+              db.close();
+            } catch(e) { console.error(e.message); }
+          " 2>&1 || echo "DB setup failed"
+
+          echo "=== Starting server (capture first 5s of output) ==="
+          timeout 8 node server/dist/index.js 2>&1 || true
