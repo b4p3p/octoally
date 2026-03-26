@@ -11,65 +11,97 @@ jobs:
   test-macos:
     runs-on: macos-latest
     steps:
+      - name: Install coreutils (for gtimeout)
+        run: brew install coreutils
+
       - name: Install OctoAlly
         run: |
           npx -y octoally@${{ github.event.inputs.version }} &
           INSTALL_PID=$!
-          sleep 30
+          sleep 45
           kill $INSTALL_PID 2>/dev/null || true
 
       - name: Check OctoAlly version
         run: |
           echo "=== Server version ==="
           grep version ~/octoally/server/package.json | head -1 || echo "not found"
-          echo "=== Server dist ==="
-          ls ~/octoally/server/dist/index.js 2>/dev/null && echo "YES" || echo "NO"
+          ls ~/octoally/server/dist/index.js 2>/dev/null && echo "Server dist: YES" || echo "Server dist: NO"
 
-      - name: Check ruflo install
+      - name: Install ruflo
         run: |
-          echo "=== Ruflo binary ==="
-          ls -la ~/.octoally/ruflo/node_modules/.bin/ruflo 2>/dev/null || echo "NOT FOUND at .octoally"
-          ls -la ~/.hivecommand/ruflo/node_modules/.bin/ruflo 2>/dev/null || echo "NOT FOUND at .hivecommand"
+          echo "=== Installing ruflo via ruflo-run.sh ==="
+          if [ -f ~/.octoally/ruflo-run.sh ]; then
+            bash ~/.octoally/ruflo-run.sh --version 2>&1 || true
+          elif [ -f ~/octoally/scripts/ruflo-run.sh ]; then
+            bash ~/octoally/scripts/ruflo-run.sh --version 2>&1 || true
+          else
+            echo "No ruflo-run.sh found, installing manually"
+            mkdir -p ~/.octoally/ruflo
+            cd ~/.octoally/ruflo
+            npm init -y --silent 2>/dev/null
+            npm install ruflo@latest --save 2>&1 | tail -5
+          fi
+          echo "=== Ruflo binary check ==="
+          ls -la ~/.octoally/ruflo/node_modules/.bin/ruflo 2>/dev/null || echo "NOT FOUND"
 
       - name: Check for stale agentdb
         run: |
           echo "=== Stale agentdb in ruflo install ==="
-          find ~/.octoally/ruflo/node_modules -name "package.json" -path "*/agentdb/*" 2>/dev/null | while read f; do echo "$f: $(grep version "$f" | head -1)"; done
-          echo "=== Stale npx caches ==="
+          find ~/.octoally/ruflo/node_modules -maxdepth 2 -name "package.json" -path "*/agentdb/*" 2>/dev/null | while read f; do
+            echo "$f: $(grep '"version"' "$f" | head -1)"
+          done
+          echo "=== Stale agentdb at top level ==="
+          ls ~/.octoally/ruflo/node_modules/agentdb/package.json 2>/dev/null && echo "HAS STANDALONE AGENTDB (STALE)" || echo "No standalone agentdb (good)"
+          echo "=== npx caches ==="
           for dir in ~/.npm/_npx/*/; do
             [ -d "$dir" ] || continue
             if [ -f "${dir}node_modules/@claude-flow/cli/package.json" ]; then
-              echo "FOUND: $dir"
+              echo "FOUND claude-flow cache: $dir"
               ls "${dir}node_modules/agentdb/package.json" 2>/dev/null && echo "  HAS STALE AGENTDB" || echo "  clean"
             fi
           done
           echo "done"
 
-      - name: Run ruflo init and check hooks
+      - name: Run ruflo init on test project
         run: |
           mkdir -p ~/test-project && cd ~/test-project
-          echo "=== Running ruflo init ==="
-          if [ -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then
-            ~/.octoally/ruflo/node_modules/.bin/ruflo init --force 2>&1 | tail -20 || echo "ruflo init failed"
-          else
-            echo "No ruflo binary"; exit 0
-          fi
-          echo "=== Stop hooks ==="
-          grep -A8 '"Stop"' .claude/settings.json 2>/dev/null || echo "No Stop hooks"
+          RUFLO=~/.octoally/ruflo/node_modules/.bin/ruflo
+          if [ ! -f "$RUFLO" ]; then echo "No ruflo binary"; exit 0; fi
+          echo "=== ruflo init ==="
+          "$RUFLO" init --force 2>&1 | tail -10 || echo "ruflo init failed"
+          echo ""
+          echo "=== Stop hooks in settings.json ==="
+          grep -A8 '"Stop"' .claude/settings.json 2>/dev/null || echo "No Stop hooks found"
+          echo ""
           echo "=== session-end.sh ==="
           cat .claude/hooks/session-end.sh 2>/dev/null || echo "No session-end.sh"
 
-      - name: Test ruflo hooks session-end
+      - name: Test ruflo hooks session-end hangs
         run: |
+          RUFLO=~/.octoally/ruflo/node_modules/.bin/ruflo
+          if [ ! -f "$RUFLO" ]; then echo "No ruflo binary"; exit 0; fi
           cd ~/test-project
-          if [ ! -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then echo "No ruflo"; exit 0; fi
-          echo "=== Testing session-end (5s timeout) ==="
-          perl -e 'alarm 5; exec @ARGV' ~/.octoally/ruflo/node_modules/.bin/ruflo hooks session-end --generate-summary true --persist-state true --export-metrics true 2>&1
-          echo "EXIT: $?"
+          echo "=== Testing ruflo hooks session-end (10s timeout) ==="
+          gtimeout 10 "$RUFLO" hooks session-end --generate-summary true --persist-state true --export-metrics true 2>&1
+          EXIT=$?
+          echo "EXIT CODE: $EXIT"
+          if [ $EXIT -eq 124 ]; then echo "TIMED OUT - CONFIRMS HANG BUG"; fi
 
       - name: Test server startup migration
         run: |
-          cd ~/octoally
-          node -e "const D=require('better-sqlite3'),p=require('path'),o=require('os');const d=new D(p.join(o.homedir(),'.octoally','octoally.db'));d.exec('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT,path TEXT,description TEXT,ruflo_prompt TEXT,openclaw_prompt TEXT,default_web_url TEXT,created_at TEXT,updated_at TEXT)');d.prepare('INSERT OR IGNORE INTO projects(id,name,path)VALUES(?,?,?)').run('t1','test',p.join(o.homedir(),'test-project'));d.close();console.log('DB ready')" 2>&1 || echo "DB setup failed"
-          echo "=== Server startup (8s capture) ==="
-          timeout 8 node server/dist/index.js 2>&1 || true
+          cd ~/octoally/server
+          echo "=== Adding test project to DB ==="
+          node -e "const D=require('better-sqlite3'),p=require('path'),o=require('os');try{const d=new D(p.join(o.homedir(),'.octoally','octoally.db'));d.exec('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT,path TEXT,description TEXT,ruflo_prompt TEXT,openclaw_prompt TEXT,default_web_url TEXT,created_at TEXT,updated_at TEXT)');d.prepare('INSERT OR IGNORE INTO projects(id,name,path)VALUES(?,?,?)').run('t1','test',p.join(o.homedir(),'test-project'));d.close();console.log('DB ready')}catch(e){console.error(e.message)}"
+          echo "=== Server startup (10s capture) ==="
+          gtimeout 10 node dist/index.js 2>&1 || true
+
+      - name: Post-migration check
+        run: |
+          echo "=== agentdb after server startup ==="
+          ls ~/.octoally/ruflo/node_modules/agentdb/package.json 2>/dev/null && echo "STILL HAS STALE AGENTDB - CLEANUP FAILED" || echo "AGENTDB CLEANED - SUCCESS"
+          echo ""
+          echo "=== session-end.sh after migration ==="
+          grep "npx" ~/test-project/.claude/hooks/session-end.sh 2>/dev/null && echo "STILL HAS NPX - MIGRATION FAILED" || echo "NPX REMOVED - SUCCESS"
+          echo ""
+          echo "=== settings.json Stop hooks after migration ==="
+          grep -A5 '"Stop"' ~/test-project/.claude/settings.json 2>/dev/null | grep "command" || echo "No Stop hooks"
