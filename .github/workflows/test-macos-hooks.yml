@@ -15,17 +15,15 @@ jobs:
         run: |
           npx -y octoally@${{ github.event.inputs.version }} &
           INSTALL_PID=$!
-          # Wait for install to complete (server starts in background)
           sleep 30
           kill $INSTALL_PID 2>/dev/null || true
 
       - name: Check OctoAlly version
         run: |
           echo "=== Server version ==="
-          cat ~/octoally/server/package.json | grep version | head -1
-          echo ""
-          echo "=== Server dist exists ==="
-          ls ~/octoally/server/dist/index.js && echo "YES" || echo "NO"
+          grep version ~/octoally/server/package.json | head -1 || echo "not found"
+          echo "=== Server dist ==="
+          ls ~/octoally/server/dist/index.js 2>/dev/null && echo "YES" || echo "NO"
 
       - name: Check ruflo install
         run: |
@@ -36,85 +34,42 @@ jobs:
       - name: Check for stale agentdb
         run: |
           echo "=== Stale agentdb in ruflo install ==="
-          find ~/.octoally/ruflo/node_modules -name "package.json" -path "*/agentdb/*" 2>/dev/null | while read f; do
-            echo "$f: $(grep '"version"' "$f" | head -1)"
-          done || echo "None found"
-
-          echo ""
+          find ~/.octoally/ruflo/node_modules -name "package.json" -path "*/agentdb/*" 2>/dev/null | while read f; do echo "$f: $(grep version "$f" | head -1)"; done
           echo "=== Stale npx caches ==="
           for dir in ~/.npm/_npx/*/; do
             [ -d "$dir" ] || continue
             if [ -f "${dir}node_modules/@claude-flow/cli/package.json" ]; then
-              echo "FOUND claude-flow cache: $dir"
-              ls "${dir}node_modules/agentdb/package.json" 2>/dev/null && echo "  HAS STALE AGENTDB" || echo "  no standalone agentdb"
+              echo "FOUND: $dir"
+              ls "${dir}node_modules/agentdb/package.json" 2>/dev/null && echo "  HAS STALE AGENTDB" || echo "  clean"
             fi
-          done || echo "No npx caches"
+          done
+          echo "done"
 
-      - name: Simulate ruflo init and check hooks
+      - name: Run ruflo init and check hooks
         run: |
-          # Create a test project
-          mkdir -p ~/test-project
-          cd ~/test-project
-
+          mkdir -p ~/test-project && cd ~/test-project
           echo "=== Running ruflo init ==="
           if [ -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then
             ~/.octoally/ruflo/node_modules/.bin/ruflo init --force 2>&1 | tail -20 || echo "ruflo init failed"
           else
-            echo "No ruflo binary available"
-            exit 0
+            echo "No ruflo binary"; exit 0
           fi
-
-          echo ""
-          echo "=== Stop hooks in settings.json ==="
-          if [ -f .claude/settings.json ]; then
-            python3 -c "
-import json
-with open('.claude/settings.json') as f:
-    s = json.load(f)
-hooks = s.get('hooks', {})
-for key in ['Stop', 'SessionEnd']:
-    for entry in hooks.get(key, []):
-        for h in entry.get('hooks', []):
-            cmd = h.get('command', '')
-            timeout = h.get('timeout', 'NONE')
-            print(f'[{key}] timeout={timeout} command={cmd[:120]}')
-" || echo "Failed to parse settings.json"
-          else
-            echo "No settings.json created"
-          fi
-
-          echo ""
-          echo "=== session-end.sh content ==="
+          echo "=== Stop hooks ==="
+          grep -A8 '"Stop"' .claude/settings.json 2>/dev/null || echo "No Stop hooks"
+          echo "=== session-end.sh ==="
           cat .claude/hooks/session-end.sh 2>/dev/null || echo "No session-end.sh"
 
-      - name: Test ruflo hooks session-end execution
+      - name: Test ruflo hooks session-end
         run: |
-          if [ ! -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then
-            echo "No ruflo binary, skipping"
-            exit 0
-          fi
-
           cd ~/test-project
-          echo "=== Testing ruflo hooks session-end (5s timeout) ==="
-          gtimeout 5 ~/.octoally/ruflo/node_modules/.bin/ruflo hooks session-end --generate-summary true --persist-state true --export-metrics true 2>&1 && echo "EXIT: $?" || echo "EXIT: $? (likely timeout)"
+          if [ ! -f ~/.octoally/ruflo/node_modules/.bin/ruflo ]; then echo "No ruflo"; exit 0; fi
+          echo "=== Testing session-end (5s timeout) ==="
+          perl -e 'alarm 5; exec @ARGV' ~/.octoally/ruflo/node_modules/.bin/ruflo hooks session-end --generate-summary true --persist-state true --export-metrics true 2>&1
+          echo "EXIT: $?"
 
-      - name: Start server and check migration logs
+      - name: Test server startup migration
         run: |
           cd ~/octoally
-          # Add a test project to the DB first
-          timeout 10 node -e "
-            const Database = require('better-sqlite3');
-            const path = require('path');
-            const os = require('os');
-            const dbPath = path.join(os.homedir(), '.octoally', 'octoally.db');
-            try {
-              const db = new Database(dbPath);
-              db.exec('CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT, path TEXT, description TEXT, ruflo_prompt TEXT, openclaw_prompt TEXT, default_web_url TEXT, created_at TEXT DEFAULT (datetime(\"now\")), updated_at TEXT DEFAULT (datetime(\"now\")))');
-              db.prepare('INSERT OR IGNORE INTO projects (id, name, path) VALUES (?, ?, ?)').run('test1', 'test-project', path.join(os.homedir(), 'test-project'));
-              console.log('Test project added to DB');
-              db.close();
-            } catch(e) { console.error(e.message); }
-          " 2>&1 || echo "DB setup failed"
-
-          echo "=== Starting server (capture first 5s of output) ==="
+          node -e "const D=require('better-sqlite3'),p=require('path'),o=require('os');const d=new D(p.join(o.homedir(),'.octoally','octoally.db'));d.exec('CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,name TEXT,path TEXT,description TEXT,ruflo_prompt TEXT,openclaw_prompt TEXT,default_web_url TEXT,created_at TEXT,updated_at TEXT)');d.prepare('INSERT OR IGNORE INTO projects(id,name,path)VALUES(?,?,?)').run('t1','test',p.join(o.homedir(),'test-project'));d.close();console.log('DB ready')" 2>&1 || echo "DB setup failed"
+          echo "=== Server startup (8s capture) ==="
           timeout 8 node server/dist/index.js 2>&1 || true
