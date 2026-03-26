@@ -98,10 +98,11 @@ async function start() {
     const rufloPrimary = join(homedir(), '.octoally', 'ruflo', 'node_modules', '.bin', 'ruflo');
     const rufloLegacy = join(homedir(), '.hivecommand', 'ruflo', 'node_modules', '.bin', 'ruflo');
     const localRuflo = existsSync(rufloPrimary) ? rufloPrimary : existsSync(rufloLegacy) ? rufloLegacy : null;
-    const hasLocalRuflo = localRuflo !== null;
     let migrated = 0;
 
-    if (hasLocalRuflo) {
+    if (!localRuflo) {
+      console.log(`  [hook-migration] No local ruflo binary found (checked ${rufloPrimary} and ${rufloLegacy})`);
+    } else {
       for (const { path: projectPath } of projects) {
         // Check all hook scripts that may reference the stale npx command
         const hookFiles = [
@@ -122,12 +123,20 @@ async function start() {
               writeFileSync(file, fixed, 'utf-8');
               migrated++;
             }
-          } catch { /* non-fatal per file */ }
+          } catch (err: any) {
+            console.error(`  [hook-migration] Failed to migrate ${file}: ${err.message}`);
+          }
         }
       }
     }
-    if (migrated > 0) console.log(`  Migrated ${migrated} hook file(s) from npx @claude-flow/cli to local ruflo`);
-  } catch { /* non-fatal */ }
+    if (migrated > 0) {
+      console.log(`  Migrated ${migrated} hook file(s) from npx @claude-flow/cli to local ruflo`);
+    } else {
+      console.log(`  [hook-migration] Checked ${projects.length} project(s), 0 needed migration (ruflo: ${localRuflo})`);
+    }
+  } catch (err: any) {
+    console.error(`  [hook-migration] Error: ${err.message}`);
+  }
 
   t = Date.now();
   await cleanupStaleRunningSessions();
