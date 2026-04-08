@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Project, type RufloAgent } from '../lib/api';
-import { Play, Loader2, Bot, TerminalSquare, Globe, Users, X, FolderOpen, GitBranch, Cpu, Activity, FileText, Zap } from 'lucide-react';
+import { Play, Loader2, Bot, TerminalSquare, Globe, Users, X, FolderOpen, GitBranch, Cpu, Activity, FileText, Zap, Code, ClipboardList, Search, FlaskConical, GitPullRequest, Compass, ArrowLeft, Star } from 'lucide-react';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { AgentGuideModal } from './AgentGuide';
 import { SessionMicButton } from './SessionMicButton';
@@ -13,6 +13,84 @@ interface SessionLauncherProps {
 }
 
 type LaunchMode = 'session' | 'agent' | null;
+
+/* ================================================================
+   Agent picker wizard — intent → agent → task
+   ================================================================
+   Curated mapping from "what does the user want to do" to a small
+   set of recommended agents, instead of dumping all 90 agents into
+   a single dropdown. Power users can still browse all via the
+   "Browse all" escape hatch.
+
+   Each intent lists agents BY NAME. The actual descriptions come
+   from the backend (api.projects.rufloAgents) so we stay in sync
+   with whatever ruflo ships — no manual paraphrases to maintain.
+
+   Agents named here that aren't installed in a given project are
+   silently filtered out at render time.
+*/
+
+type IntentKey = 'write-code' | 'plan-estimate' | 'review-audit' | 'test-validate' | 'github-workflow';
+
+interface IntentDef {
+  key: IntentKey;
+  label: string;
+  tagline: string;
+  icon: typeof Bot;
+  color: string;
+  recommended: string[];
+  domainSpecific: string[];
+}
+
+const INTENTS: IntentDef[] = [
+  {
+    key: 'write-code',
+    label: 'Write code',
+    tagline: 'Build a feature, fix a bug, refactor',
+    icon: Code,
+    color: '#60a5fa',
+    recommended: ['coder', 'sparc-coder'],
+    domainSpecific: ['backend-dev', 'mobile-dev', 'ml-developer', 'api-docs'],
+  },
+  {
+    key: 'plan-estimate',
+    label: 'Plan / scope / estimate',
+    tagline: 'Quote a project, break it down, assess risk',
+    icon: ClipboardList,
+    color: '#a78bfa',
+    recommended: ['planner', 'researcher'],
+    domainSpecific: ['goal-planner', 'system-architect'],
+  },
+  {
+    key: 'review-audit',
+    label: 'Review / audit',
+    tagline: 'Code review, quality, security',
+    icon: Search,
+    color: '#f59e0b',
+    recommended: ['code-analyzer'],
+    domainSpecific: ['sona-learning-optimizer'],
+  },
+  {
+    key: 'test-validate',
+    label: 'Test / validate',
+    tagline: 'Write tests, TDD, validate',
+    icon: FlaskConical,
+    color: '#34d399',
+    recommended: ['tdd-london-swarm', 'production-validator'],
+    domainSpecific: ['test-long-runner'],
+  },
+  {
+    key: 'github-workflow',
+    label: 'GitHub workflow',
+    tagline: 'PRs, issues, releases',
+    icon: GitPullRequest,
+    color: '#ec4899',
+    recommended: ['pr-manager', 'code-review-swarm', 'issue-tracker'],
+    domainSpecific: ['release-manager', 'cicd-engineer', 'github-modes'],
+  },
+];
+
+type WizardStep = 'intent' | 'agent' | 'browse-all' | 'task';
 
 function TaskModal({
   mode,
@@ -37,14 +115,23 @@ function TaskModal({
   const [sessionPrompt, setSessionPrompt] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Wizard state — only used when mode === 'agent'. In session mode the
+  // wizard is bypassed entirely and we go straight to the task step.
+  const [wizardStep, setWizardStep] = useState<WizardStep>(mode === 'agent' ? 'intent' : 'task');
+  const [selectedIntent, setSelectedIntent] = useState<IntentDef | null>(null);
+  const [browseQuery, setBrowseQuery] = useState('');
+
+  // Lookup map: agent name → full RufloAgent (with description, category)
+  const agentByName = new Map(agents.map((a) => [a.name, a]));
+
   useEffect(() => {
-    textareaRef.current?.focus();
+    if (wizardStep === 'task') textareaRef.current?.focus();
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose]);
+  }, [onClose, wizardStep]);
 
   const sessionPromptVal = (sessionPrompt ?? project.session_prompt ?? '').trim();
   const effectiveTask = task.trim() || 'Start up and ask me what I want you to do and NOTHING ELSE';
@@ -55,6 +142,30 @@ function TaskModal({
   const handleLaunch = () => {
     onLaunch(finalTask, mode === 'agent' ? agentType : undefined, cliType);
   };
+
+  // Pick an agent and advance to the task step
+  const pickAgent = (name: string) => {
+    setAgentType(name);
+    setWizardStep('task');
+  };
+
+  // Resolve curated agent name lists into actual RufloAgent objects,
+  // silently dropping any that aren't installed in this project.
+  const resolveAgents = (names: string[]): RufloAgent[] =>
+    names.map((n) => agentByName.get(n)).filter((a): a is RufloAgent => Boolean(a));
+
+  // For "Browse all" — flat list filtered by search query, grouped by backend category
+  const browseFiltered = browseQuery.trim()
+    ? agents.filter((a) => {
+        const q = browseQuery.toLowerCase();
+        return a.name.toLowerCase().includes(q) || (a.description || '').toLowerCase().includes(q);
+      })
+    : agents;
+  const browseGrouped = browseFiltered.reduce<Record<string, RufloAgent[]>>((acc, a) => {
+    const cat = a.category || '(uncategorized)';
+    (acc[cat] ??= []).push(a);
+    return acc;
+  }, {});
 
   return (
     <div
@@ -88,179 +199,399 @@ function TaskModal({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
-          {/* CLI type selector */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>CLI:</span>
-            <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
-              <button
-                onClick={() => setCliType('claude')}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
-                style={{
-                  background: cliType === 'claude' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
-                  color: cliType === 'claude' ? 'var(--accent)' : 'var(--text-secondary)',
-                  borderRight: '1px solid var(--border)',
-                }}
-              >
-                <ClaudeIcon className="w-3.5 h-3.5" />
-                Claude
-              </button>
-              <button
-                onClick={() => setCliType('codex')}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
-                style={{
-                  background: cliType === 'codex' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
-                  color: cliType === 'codex' ? 'var(--accent)' : 'var(--text-secondary)',
-                }}
-              >
-                <CodexIcon className="w-3.5 h-3.5" />
-                Codex
-              </button>
-            </div>
-          </div>
-
-          {/* Info box */}
-          <div
-            className="rounded-lg border p-4 space-y-2"
-            style={{ background: 'var(--bg-primary)', borderColor: mode === 'agent' ? '#ef4444' : '#60a5fa', borderWidth: '1px' }}
-          >
-            {mode === 'session' ? (
-              <>
-                <div className="flex items-center gap-2 text-sm font-medium" style={{ color: '#60a5fa' }}>
-                  <Zap className="w-4 h-4" />
-                  Interactive Session
-                </div>
-                <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                  Launches an interactive Claude or Codex session for your project. Best for general development, debugging, and tasks you want to guide directly.
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="flex items-center gap-2 text-sm font-medium" style={{ color: '#ef4444' }}>
-                  <Bot className="w-4 h-4" />
-                  Single Specialist Agent
-                </div>
-                <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                  Spawns one focused agent with a specific skill set. Best for targeted tasks like code review, testing, security auditing, or documentation where you want deep expertise in a single area.
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Agent type selector */}
-          {mode === 'agent' && (
-            <div>
-              <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Agent Type</h3>
-              <select
-                value={agentType}
-                onChange={(e) => setAgentType(e.target.value)}
-                className="w-full px-3 py-2.5 rounded-lg border text-sm outline-none"
-                style={{
-                  background: 'var(--bg-primary)',
-                  borderColor: 'var(--border)',
-                  color: 'var(--text-primary)',
-                }}
-              >
-                {agents.map((a) => (
-                  <option key={a.name} value={a.name} title={a.description}>
-                    {a.name} — {a.description.slice(0, 60)}{a.description.length > 60 ? '...' : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
+          {/* ============================================================
+              STEP: intent — agent mode wizard, step 1 of 3
+              "What do you want to do?"
+              ============================================================ */}
+          {mode === 'agent' && wizardStep === 'intent' && (
+            <>
+              <div>
+                <h3 className="text-base font-semibold mb-1" style={{ color: 'var(--text-primary)' }}>
+                  What do you want to do?
+                </h3>
+                <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                  Pick an intent and we'll suggest the right agent for the job. {agents.length} agents installed in this project.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {INTENTS.map((intent) => {
+                  const count = resolveAgents([...intent.recommended, ...intent.domainSpecific]).length;
+                  const Icon = intent.icon;
+                  return (
+                    <button
+                      key={intent.key}
+                      onClick={() => { setSelectedIntent(intent); setWizardStep('agent'); }}
+                      disabled={count === 0}
+                      className="text-left rounded-lg border p-4 transition-colors hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed"
+                      style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                      title={count === 0 ? 'No agents from this intent are installed in this project' : undefined}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <Icon className="w-4 h-4" style={{ color: intent.color }} />
+                        <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                          {intent.label}
+                        </span>
+                      </div>
+                      <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                        {intent.tagline}
+                      </p>
+                      <p className="text-[10px] mt-2 font-mono" style={{ color: 'var(--text-secondary)', opacity: 0.6 }}>
+                        {count} agent{count === 1 ? '' : 's'}
+                      </p>
+                    </button>
+                  );
+                })}
+                {/* Browse all escape hatch */}
+                <button
+                  onClick={() => setWizardStep('browse-all')}
+                  className="text-left rounded-lg border border-dashed p-4 transition-colors hover:bg-white/5 col-span-2"
+                  style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                >
+                  <div className="flex items-center gap-2 mb-1">
+                    <Compass className="w-4 h-4" style={{ color: 'var(--text-secondary)' }} />
+                    <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      Browse all {agents.length} agents →
+                    </span>
+                  </div>
+                  <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    Search by name or description, grouped by category. For power users.
+                  </p>
+                </button>
+              </div>
+            </>
           )}
 
-          {/* Task input */}
-          <div>
-            <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Task / Objective</h3>
-            <textarea
-              ref={textareaRef}
-              value={task}
-              onChange={(e) => setTask(e.target.value)}
-              placeholder={`Describe what you want ${mode === 'agent' ? `the ${agentType} agent` : 'Claude'} to do...\n\nLeave empty to use default: "Start up and ask me what I want you to do"`}
-              rows={5}
-              className="w-full px-4 py-3 rounded-lg border text-sm outline-none resize-y"
-              style={{
-                background: 'var(--bg-primary)',
-                borderColor: 'var(--border)',
-                color: 'var(--text-primary)',
-                minHeight: '120px',
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  if (cliType === 'codex' && !codexReady) return;
-                  handleLaunch();
-                }
-              }}
-            />
-            <div className="flex items-center justify-between mt-1.5">
-              <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                Cmd+Enter to launch
-              </p>
-              <SessionMicButton
-                small
-                onText={(text) => setTask((prev) => prev ? `${prev} ${text}` : text)}
-              />
-            </div>
-          </div>
+          {/* ============================================================
+              STEP: agent — agent mode wizard, step 2 of 3
+              List of recommended + domain-specific agents in the chosen intent
+              ============================================================ */}
+          {mode === 'agent' && wizardStep === 'agent' && selectedIntent && (
+            <>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { setSelectedIntent(null); setWizardStep('intent'); }}
+                  className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded hover:bg-white/10"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  <ArrowLeft className="w-3 h-3" />
+                  Back
+                </button>
+                <div className="flex items-center gap-1.5 ml-2">
+                  <selectedIntent.icon className="w-4 h-4" style={{ color: selectedIntent.color }} />
+                  <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                    {selectedIntent.label}
+                  </h3>
+                </div>
+              </div>
 
-          {/* Prompt override — switches between CLAUDE.md and AGENTS.md based on CLI toggle */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
-                {cliType === 'codex' ? 'AGENTS.md' : 'CLAUDE.md'} Prompt Override
-              </h3>
-              <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                Prepended to task as additional instructions
-              </span>
-            </div>
-            <textarea
-              value={sessionPrompt ?? project.session_prompt ?? ''}
-              onChange={(e) => setSessionPrompt(e.target.value)}
-              placeholder={`Additional instructions prepended to the task (supplements your project's ${cliType === 'codex' ? 'AGENTS.md' : 'CLAUDE.md'})...`}
-              rows={2}
-              className="w-full px-4 py-3 rounded-lg border text-sm outline-none resize-y"
-              style={{
-                background: 'var(--bg-primary)',
-                borderColor: 'var(--border)',
-                color: 'var(--text-primary)',
-              }}
-            />
-            {sessionPrompt !== null && (
-              <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
-                Modified for this session only.
-              </p>
-            )}
-          </div>
+              {/* Recommended */}
+              {(() => {
+                const recs = resolveAgents(selectedIntent.recommended);
+                if (recs.length === 0) return null;
+                return (
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Star className="w-3 h-3" style={{ color: '#fbbf24' }} />
+                      <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
+                        Recommended
+                      </span>
+                    </div>
+                    <div className="space-y-2">
+                      {recs.map((a) => (
+                        <button
+                          key={a.name}
+                          onClick={() => pickAgent(a.name)}
+                          className="w-full text-left rounded-lg border p-3 transition-colors hover:bg-white/5"
+                          style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                        >
+                          <div className="text-sm font-semibold mb-0.5" style={{ color: 'var(--text-primary)' }}>
+                            {a.name}
+                          </div>
+                          <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                            {a.description}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
-          {/* Launch button — inline like OpenClaw's action area */}
-          <div className="flex items-center justify-end gap-3 pt-2">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-              style={{
-                background: 'var(--bg-tertiary)',
-                color: 'var(--text-secondary)',
-                border: '1px solid var(--border)',
-              }}
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleLaunch}
-              disabled={cliType === 'codex' && !codexReady}
-              className="flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ background: 'var(--accent)', color: 'white' }}
-              title={cliType === 'codex' && !codexReady ? 'Codex not initialized — re-init RuFlo first' : undefined}
-            >
-              {mode === 'agent' ? (
-                <Users className="w-4 h-4" />
-              ) : (
-                <Play className="w-4 h-4" />
+              {/* Domain-specific */}
+              {(() => {
+                const domains = resolveAgents(selectedIntent.domainSpecific);
+                if (domains.length === 0) return null;
+                return (
+                  <div>
+                    <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
+                      Domain-specific
+                    </span>
+                    <div className="space-y-2 mt-2">
+                      {domains.map((a) => (
+                        <button
+                          key={a.name}
+                          onClick={() => pickAgent(a.name)}
+                          className="w-full text-left rounded-lg border p-3 transition-colors hover:bg-white/5"
+                          style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                        >
+                          <div className="text-sm font-semibold mb-0.5" style={{ color: 'var(--text-primary)' }}>
+                            {a.name}
+                          </div>
+                          <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                            {a.description}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <button
+                onClick={() => setWizardStep('browse-all')}
+                className="text-xs underline"
+                style={{ color: 'var(--text-secondary)' }}
+              >
+                Browse all {agents.length} agents instead →
+              </button>
+            </>
+          )}
+
+          {/* ============================================================
+              STEP: browse-all — flat list of every installed agent,
+              filterable by name or description, grouped by backend category
+              ============================================================ */}
+          {mode === 'agent' && wizardStep === 'browse-all' && (
+            <>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setWizardStep('intent')}
+                  className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded hover:bg-white/10"
+                  style={{ color: 'var(--text-secondary)' }}
+                >
+                  <ArrowLeft className="w-3 h-3" />
+                  Back
+                </button>
+                <h3 className="text-sm font-semibold ml-2" style={{ color: 'var(--text-primary)' }}>
+                  All agents ({browseFiltered.length}/{agents.length})
+                </h3>
+              </div>
+              <div className="relative">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-secondary)' }} />
+                <input
+                  type="text"
+                  value={browseQuery}
+                  onChange={(e) => setBrowseQuery(e.target.value)}
+                  placeholder="Search by name or description..."
+                  autoFocus
+                  className="w-full pl-9 pr-3 py-2 rounded-lg border text-sm outline-none"
+                  style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)', color: 'var(--text-primary)' }}
+                />
+              </div>
+              <div className="space-y-4">
+                {Object.keys(browseGrouped).sort().map((cat) => (
+                  <div key={cat}>
+                    <div className="text-[11px] font-bold uppercase tracking-wider mb-1.5" style={{ color: 'var(--text-secondary)' }}>
+                      {cat} ({browseGrouped[cat].length})
+                    </div>
+                    <div className="space-y-1">
+                      {browseGrouped[cat].map((a) => (
+                        <button
+                          key={a.name}
+                          onClick={() => pickAgent(a.name)}
+                          className="w-full text-left rounded border px-3 py-2 transition-colors hover:bg-white/5"
+                          style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                        >
+                          <div className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                            {a.name}
+                          </div>
+                          <div className="text-[11px] mt-0.5 line-clamp-2" style={{ color: 'var(--text-secondary)' }}>
+                            {a.description}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {browseFiltered.length === 0 && (
+                  <p className="text-xs text-center py-8" style={{ color: 'var(--text-secondary)' }}>
+                    No agents match "{browseQuery}"
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* ============================================================
+              STEP: task — final step, also the entry point for session mode
+              CLI selector + info box + task input + prompt override + launch
+              ============================================================ */}
+          {wizardStep === 'task' && (
+            <>
+              {/* Selected agent recap (only in agent mode) */}
+              {mode === 'agent' && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setWizardStep(selectedIntent ? 'agent' : 'intent')}
+                    className="flex items-center gap-1 text-xs font-medium px-2 py-1 rounded hover:bg-white/10"
+                    style={{ color: 'var(--text-secondary)' }}
+                  >
+                    <ArrowLeft className="w-3 h-3" />
+                    Change agent
+                  </button>
+                  <div className="flex items-center gap-1.5 ml-2">
+                    <Bot className="w-4 h-4" style={{ color: '#ef4444' }} />
+                    <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      {agentType}
+                    </span>
+                    {agentByName.get(agentType)?.description && (
+                      <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                        — {agentByName.get(agentType)!.description.slice(0, 80)}{(agentByName.get(agentType)!.description.length > 80) ? '…' : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
               )}
-              Launch
-            </button>
-          </div>
+
+              {/* CLI type selector */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>CLI:</span>
+                <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
+                  <button
+                    onClick={() => setCliType('claude')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
+                    style={{
+                      background: cliType === 'claude' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
+                      color: cliType === 'claude' ? 'var(--accent)' : 'var(--text-secondary)',
+                      borderRight: '1px solid var(--border)',
+                    }}
+                  >
+                    <ClaudeIcon className="w-3.5 h-3.5" />
+                    Claude
+                  </button>
+                  <button
+                    onClick={() => setCliType('codex')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
+                    style={{
+                      background: cliType === 'codex' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
+                      color: cliType === 'codex' ? 'var(--accent)' : 'var(--text-secondary)',
+                    }}
+                  >
+                    <CodexIcon className="w-3.5 h-3.5" />
+                    Codex
+                  </button>
+                </div>
+              </div>
+
+              {/* Info box — only for session mode, since the agent step is now self-explanatory via the wizard */}
+              {mode === 'session' && (
+                <div
+                  className="rounded-lg border p-4 space-y-2"
+                  style={{ background: 'var(--bg-primary)', borderColor: '#60a5fa', borderWidth: '1px' }}
+                >
+                  <div className="flex items-center gap-2 text-sm font-medium" style={{ color: '#60a5fa' }}>
+                    <Zap className="w-4 h-4" />
+                    Interactive Session
+                  </div>
+                  <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
+                    Launches an interactive Claude or Codex session for your project. Best for general development, debugging, and tasks you want to guide directly.
+                  </div>
+                </div>
+              )}
+
+              {/* Task input */}
+              <div>
+                <h3 className="text-sm font-semibold mb-2" style={{ color: 'var(--text-primary)' }}>Task / Objective</h3>
+                <textarea
+                  ref={textareaRef}
+                  value={task}
+                  onChange={(e) => setTask(e.target.value)}
+                  placeholder={`Describe what you want ${mode === 'agent' ? `the ${agentType} agent` : 'Claude'} to do...\n\nLeave empty to use default: "Start up and ask me what I want you to do"`}
+                  rows={5}
+                  className="w-full px-4 py-3 rounded-lg border text-sm outline-none resize-y"
+                  style={{
+                    background: 'var(--bg-primary)',
+                    borderColor: 'var(--border)',
+                    color: 'var(--text-primary)',
+                    minHeight: '120px',
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                      e.preventDefault();
+                      if (cliType === 'codex' && !codexReady) return;
+                      handleLaunch();
+                    }
+                  }}
+                />
+                <div className="flex items-center justify-between mt-1.5">
+                  <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    Cmd+Enter to launch
+                  </p>
+                  <SessionMicButton
+                    small
+                    onText={(text) => setTask((prev) => prev ? `${prev} ${text}` : text)}
+                  />
+                </div>
+              </div>
+
+              {/* Prompt override — switches between CLAUDE.md and AGENTS.md based on CLI toggle */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                    {cliType === 'codex' ? 'AGENTS.md' : 'CLAUDE.md'} Prompt Override
+                  </h3>
+                  <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    Prepended to task as additional instructions
+                  </span>
+                </div>
+                <textarea
+                  value={sessionPrompt ?? project.session_prompt ?? ''}
+                  onChange={(e) => setSessionPrompt(e.target.value)}
+                  placeholder={`Additional instructions prepended to the task (supplements your project's ${cliType === 'codex' ? 'AGENTS.md' : 'CLAUDE.md'})...`}
+                  rows={2}
+                  className="w-full px-4 py-3 rounded-lg border text-sm outline-none resize-y"
+                  style={{
+                    background: 'var(--bg-primary)',
+                    borderColor: 'var(--border)',
+                    color: 'var(--text-primary)',
+                  }}
+                />
+                {sessionPrompt !== null && (
+                  <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
+                    Modified for this session only.
+                  </p>
+                )}
+              </div>
+
+              {/* Launch button */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  onClick={onClose}
+                  className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+                  style={{
+                    background: 'var(--bg-tertiary)',
+                    color: 'var(--text-secondary)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleLaunch}
+                  disabled={cliType === 'codex' && !codexReady}
+                  className="flex items-center gap-2 px-6 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ background: 'var(--accent)', color: 'white' }}
+                >
+                  {mode === 'agent' ? (
+                    <Users className="w-4 h-4" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                  Launch
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
