@@ -138,6 +138,7 @@ function ProjectForm({
   const [name, setName] = useState(project?.name || '');
   const [path, setPath] = useState(project?.path || '');
   const [description, setDescription] = useState(project?.description || '');
+  const [projectColor, setProjectColor] = useState(project?.color || '');
   const [defaultWebUrl, setDefaultWebUrl] = useState(project?.default_web_url || '');
   const [sessionPrompt, setSessionPrompt] = useState(project?.session_prompt || '');
   const [openclawPrompt, setOpenclawPrompt] = useState(project?.openclaw_prompt || '');
@@ -213,7 +214,7 @@ function ProjectForm({
 
   const createMutation = useMutation({
     mutationFn: () =>
-      api.projects.create({ name, path, description, default_web_url: defaultWebUrl || undefined }),
+      api.projects.create({ name, path, description, default_web_url: defaultWebUrl || undefined, color: projectColor || undefined }),
     onSuccess: async (data) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       onSubmit();
@@ -231,7 +232,7 @@ function ProjectForm({
 
   const updateMutation = useMutation({
     mutationFn: () => {
-      const fields: Record<string, string | null | undefined> = {};
+      const fields: Record<string, string | number | null | undefined> = {};
       if (name !== project!.name) fields.name = name;
       if (description !== (project!.description || '')) fields.description = description;
       if (defaultWebUrl !== (project!.default_web_url || '')) fields.default_web_url = defaultWebUrl || null;
@@ -239,7 +240,9 @@ function ProjectForm({
         fields.session_prompt = sessionPrompt || null;
       if (openclawPrompt !== (project!.openclaw_prompt || ''))
         fields.openclaw_prompt = openclawPrompt || null;
-      return api.projects.update(project!.id, fields);
+      // Always send color to ensure save works even if only color changed
+      fields.color = projectColor || '';
+      return api.projects.update(project!.id, fields as any);
     },
     onSuccess: async () => {
       const savePath = project!.path;
@@ -407,6 +410,30 @@ function ProjectForm({
                   className={inputClass}
                   style={inputStyle}
                 />
+              </div>
+            </div>
+
+            {/* Card Color */}
+            <div>
+              <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>Card Color</label>
+              <div className="flex items-center gap-2">
+                {['#3b82f6', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1'].map((c) => {
+                  const defaultColors = ['#3b82f6', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1'];
+                  const hash = name.split('').reduce((a, ch) => a + ch.charCodeAt(0), 0);
+                  const isActive = projectColor ? projectColor === c : c === defaultColors[hash % defaultColors.length];
+                  return (
+                    <button
+                      key={c}
+                      onClick={() => setProjectColor(c)}
+                      className="w-6 h-6 rounded-full border-2 transition-transform hover:scale-110"
+                      style={{
+                        background: c,
+                        borderColor: isActive ? 'white' : 'transparent',
+                        boxShadow: isActive ? `0 0 0 2px ${c}` : 'none',
+                      }}
+                    />
+                  );
+                })}
               </div>
             </div>
 
@@ -761,54 +788,79 @@ function ProjectForm({
               </div>
             )}
 
-            {/* Clean RuFlo — always available in edit mode */}
-            {mode === 'edit' && (
-              <div
-                className="flex items-center justify-between px-4 py-3 rounded-lg border"
-                style={{ borderColor: '#ef444440', background: '#ef444410' }}
-              >
-                <div>
-                  <p className="text-xs font-medium" style={{ color: '#ef4444' }}>Remove RuFlo</p>
-                  <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                    Removes .claude/, .codex/, CLAUDE.md, and all ruflo/claude-flow config. Claude/Codex will re-initialize with default settings on next use.
-                  </p>
-                </div>
-                <button
-                  onClick={async (e) => {
-                    e.preventDefault();
-                    if (!confirm(
-                      'This will delete ALL Claude and Codex settings for this project (.claude/, .codex/, CLAUDE.md, AGENTS.md).\n\n' +
-                      'Claude/Codex will ask you to trust the folder again on next use and create fresh default settings.\n\n' +
-                      'This is necessary because RuFlo was found to have significant issues.\n\n' +
-                      'Continue?'
-                    )) return;
-                    try {
-                      await api.projects.rufloUninstall(project!.id);
-                      queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
-                      queryClient.invalidateQueries({ queryKey: ['ruflo-disposition'] });
-                      const pp = project!.path;
-                      await Promise.all([
-                        queryClient.invalidateQueries({ queryKey: ['file-read', pp, 'CLAUDE.md'] }),
-                        queryClient.invalidateQueries({ queryKey: ['file-read', pp, 'AGENTS.md'] }),
-                        queryClient.invalidateQueries({ queryKey: ['file-read', pp, '.claude/settings.json'] }),
-                      ]);
-                      setClaudeMd('');
-                      setInitialClaudeMd('');
-                      setSettingsJson('');
-                      setInitialSettingsJson('');
-                      setAgentsMd('');
-                      setInitialAgentsMd('');
-                    } catch (err: any) {
-                      setError(err.message || 'Cleanup failed');
-                    }
-                  }}
-                  className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium"
-                  style={{ background: '#ef4444', color: 'white', border: 'none' }}
+            {/* Reset Project — always available in edit mode */}
+            {mode === 'edit' && (() => {
+              const [resetting, setResetting] = useState(false);
+              const [resetResult, setResetResult] = useState<string | null>(null);
+              return (
+                <div
+                  className="flex items-center justify-between px-4 py-3 rounded-lg border"
+                  style={{ borderColor: '#f59e0b40', background: '#f59e0b10' }}
                 >
-                  Remove
-                </button>
-              </div>
-            )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium" style={{ color: '#f59e0b' }}>Reset Project</p>
+                    <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                      Removes .claude/, .codex/, CLAUDE.md, AGENTS.md, and all config files. Claude/Codex will re-initialize with default settings on next use.
+                    </p>
+                    {resetResult && (
+                      <p className="text-[10px] mt-1" style={{ color: resetResult.startsWith('Error') ? '#ef4444' : '#22c55e' }}>
+                        {resetResult}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={async (e) => {
+                      e.preventDefault();
+                      if (!confirm(
+                        'This will delete ALL Claude and Codex settings for this project (.claude/, .codex/, CLAUDE.md, AGENTS.md).\n\n' +
+                        'Claude/Codex will ask you to trust the folder again on next use.\n\nContinue?'
+                      )) return;
+                      setResetting(true);
+                      setResetResult(null);
+                      try {
+                        const result = await api.projects.rufloUninstall(project!.id);
+                        // Reset color to blue and clear prompts
+                        await api.projects.update(project!.id, {
+                          session_prompt: null,
+                          openclaw_prompt: null,
+                          color: '#3b82f6',
+                        });
+                        queryClient.invalidateQueries({ queryKey: ['projects'] });
+                        queryClient.invalidateQueries({ queryKey: ['ruflo-status'] });
+                        queryClient.invalidateQueries({ queryKey: ['ruflo-disposition'] });
+                        const pp = project!.path;
+                        await Promise.all([
+                          queryClient.invalidateQueries({ queryKey: ['file-read', pp, 'CLAUDE.md'] }),
+                          queryClient.invalidateQueries({ queryKey: ['file-read', pp, 'AGENTS.md'] }),
+                          queryClient.invalidateQueries({ queryKey: ['file-read', pp, '.claude/settings.json'] }),
+                        ]);
+                        setClaudeMd('');
+                        setInitialClaudeMd('');
+                        setSettingsJson('');
+                        setInitialSettingsJson('');
+                        setAgentsMd('');
+                        setInitialAgentsMd('');
+                        setSessionPrompt('');
+                        setOpenclawPrompt('');
+                        setProjectColor('#3b82f6');
+                        setResetResult(result.cleaned.length > 0
+                          ? `Reset complete — removed ${result.cleaned.length} item(s).`
+                          : 'Reset complete — project was already clean.');
+                      } catch (err: any) {
+                        setResetResult(`Error: ${err.message || 'Reset failed'}`);
+                      } finally {
+                        setResetting(false);
+                      }
+                    }}
+                    disabled={resetting}
+                    className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium"
+                    style={{ background: '#f59e0b', color: '#000', border: 'none', opacity: resetting ? 0.6 : 1 }}
+                  >
+                    {resetting ? 'Resetting...' : 'Reset'}
+                  </button>
+                </div>
+              );
+            })()}
 
             {/* Error */}
             {error && (
@@ -1438,6 +1490,16 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
             >
               GitHub
             </a>
+            <div className="text-center mb-4">
+              <p className="text-[10px] font-medium mb-1" style={{ color: 'var(--text-secondary)' }}>Credits</p>
+              <p className="text-[10px]" style={{ color: 'var(--text-secondary)' }}>
+                Default agents by{' '}
+                <a href="https://github.com/lst97/claude-code-sub-agents" target="_blank" rel="noopener noreferrer" className="hover:underline" style={{ color: 'var(--accent)' }}>
+                  lst97/claude-code-sub-agents
+                </a>
+                {' '}(MIT)
+              </p>
+            </div>
             <button
               onClick={() => setShowAbout(false)}
               className="px-4 py-2 rounded-lg text-sm mb-4"
@@ -1629,32 +1691,38 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
                     </div>
                   )}
 
-                  <div className="p-5 flex flex-col gap-3 flex-1">
-                    <div className="flex items-start justify-between">
-                      <div className="min-w-0 flex-1">
-                        <h3 className="text-sm font-semibold truncate" style={{ color: 'var(--text-primary)' }}>
-                          {project.name}
-                        </h3>
-                        <p className="text-xs font-mono truncate mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                          {project.path}
-                        </p>
-                      </div>
-                      {/* Session badge for projects without RuFlo bar */}
-                      {!cfStatus?.installed && (() => {
-                        const counts = activeSessionsByProject[project.id];
-                        if (!counts || counts.total === 0) return null;
-                        const badgeBg = counts.total <= 2 ? '#22c55e20' : counts.total <= 4 ? '#f59e0b20' : '#ef444420';
-                        const badgeText = counts.total <= 2 ? '#22c55e' : counts.total <= 4 ? '#f59e0b' : '#ef4444';
-                        return (
+                  {/* Title bar */}
+                  {(() => {
+                    const defaultColors = ['#3b82f6', '#8b5cf6', '#06b6d4', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#6366f1'];
+                    const hash = project.name.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+                    const color = project.color || defaultColors[hash % defaultColors.length];
+                    const counts = activeSessionsByProject[project.id];
+                    return (
+                      <div
+                        className="flex items-center justify-between px-4 py-2.5"
+                        style={{ background: `${color}15`, borderBottom: `1px solid ${color}30` }}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <h3 className="text-sm font-semibold truncate" style={{ color }}>
+                            {project.name}
+                          </h3>
+                          <p className="text-[10px] font-mono truncate mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                            {project.path}
+                          </p>
+                        </div>
+                        {counts && counts.total > 0 && (
                           <span
                             className="shrink-0 ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap"
-                            style={{ background: badgeBg, color: badgeText }}
+                            style={{ background: `${color}20`, color }}
                           >
                             {counts.total} active
                           </span>
-                        );
-                      })()}
-                    </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  <div className="p-5 pt-3 flex flex-col gap-3 flex-1">
 
                     {project.description && (
                       <p className="text-xs line-clamp-2" style={{ color: 'var(--text-secondary)' }}>

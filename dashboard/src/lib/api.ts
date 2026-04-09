@@ -78,12 +78,12 @@ export const api = {
   },
   projects: {
     list: () => fetchJSON<{ projects: Project[] }>('/projects'),
-    create: (data: { name: string; path: string; description?: string; session_prompt?: string; openclaw_prompt?: string; default_web_url?: string }) =>
+    create: (data: { name: string; path: string; description?: string; session_prompt?: string; openclaw_prompt?: string; default_web_url?: string; color?: string }) =>
       fetchJSON<{ ok: boolean; project: Project }>('/projects', {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number }) =>
+    update: (id: string, data: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number; color?: string }) =>
       fetchJSON<{ ok: boolean; project: Project }>(`/projects/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(data),
@@ -275,6 +275,7 @@ export interface Project {
   openclaw_prompt: string | null;
   default_web_url: string | null;
   skip_permissions: number;
+  color: string;
   created_at: string;
 }
 

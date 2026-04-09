@@ -104,6 +104,8 @@ export function initDb(): void {
   try { db.exec('ALTER TABLE events ADD COLUMN project_id TEXT REFERENCES projects(id)'); } catch {}
   try { db.exec('ALTER TABLE sessions ADD COLUMN pre_popout_cols INTEGER'); } catch {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_events_project ON events(project_id)'); } catch {}
+  // Per-project accent color for card title bar
+  try { db.exec("ALTER TABLE projects ADD COLUMN color TEXT DEFAULT ''"); } catch {}
   // Per-project flag to launch sessions with --dangerously-skip-permissions
   try { db.exec('ALTER TABLE projects ADD COLUMN skip_permissions INTEGER DEFAULT 0'); } catch {}
   // Codex support: track which CLI (claude or codex) launched the session

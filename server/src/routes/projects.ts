@@ -209,6 +209,7 @@ export interface Project {
   openclaw_prompt: string | null;
   default_web_url: string | null;
   skip_permissions: number;
+  color: string;
   created_at: string;
   updated_at: string;
 }
@@ -279,9 +280,9 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
 
   // Create project
   app.post<{
-    Body: { name: string; path: string; description?: string; session_prompt?: string; openclaw_prompt?: string; default_web_url?: string };
+    Body: { name: string; path: string; description?: string; session_prompt?: string; openclaw_prompt?: string; default_web_url?: string; color?: string };
   }>('/projects', async (req, reply) => {
-    const { name, path, description, session_prompt, openclaw_prompt, default_web_url } = req.body;
+    const { name, path, description, session_prompt, openclaw_prompt, default_web_url, color } = req.body;
     if (!name || !path) return reply.status(400).send({ error: 'name and path are required' });
 
     const db = getDb();
@@ -290,8 +291,8 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     const existing = db.prepare('SELECT id FROM projects WHERE path = ?').get(path);
     if (existing) return reply.status(409).send({ error: 'Project with this path already exists' });
 
-    db.prepare('INSERT INTO projects (id, name, path, description, session_prompt, openclaw_prompt, default_web_url) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, name, path, description || null, session_prompt || null, openclaw_prompt || null, default_web_url || null);
+    db.prepare('INSERT INTO projects (id, name, path, description, session_prompt, openclaw_prompt, default_web_url, color) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, name, path, description || null, session_prompt || null, openclaw_prompt || null, default_web_url || null, color || '');
 
     const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
     await exportToConfig();
@@ -305,7 +306,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
   // Update project
   app.patch<{
     Params: { id: string };
-    Body: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number };
+    Body: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number; color?: string };
   }>('/projects/:id', async (req, reply) => {
     const db = getDb();
     const updates: string[] = [];
@@ -317,6 +318,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     if (req.body.openclaw_prompt !== undefined) { updates.push('openclaw_prompt = ?'); params.push(req.body.openclaw_prompt); }
     if (req.body.default_web_url !== undefined) { updates.push('default_web_url = ?'); params.push(req.body.default_web_url); }
     if (req.body.skip_permissions !== undefined) { updates.push('skip_permissions = ?'); params.push(req.body.skip_permissions ? 1 : 0); }
+    if (req.body.color !== undefined) { updates.push('color = ?'); params.push(req.body.color); }
 
     if (updates.length === 0) return reply.status(400).send({ error: 'Nothing to update' });
 
