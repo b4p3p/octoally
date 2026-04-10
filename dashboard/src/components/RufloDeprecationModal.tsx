@@ -54,10 +54,11 @@ export function RufloDeprecationModal({ onClose }: RufloDeprecationModalProps) {
               Cleanup Complete
             </h3>
             <p className="text-sm mb-1" style={{ color: 'var(--text-secondary)' }}>
-              Removed RuFlo from {result.projectsCleaned} project{result.projectsCleaned !== 1 ? 's' : ''}.
+              Cleaned ruflo from {result.projectsCleaned} project{result.projectsCleaned !== 1 ? 's' : ''}.
             </p>
             <p className="text-xs mb-6" style={{ color: 'var(--text-secondary)' }}>
-              Claude and Codex will re-initialize with default settings on next use.
+              Any remaining <strong>CLAUDE.md</strong> / <strong>AGENTS.md</strong> files with
+              mixed content were left intact for manual review.
             </p>
             <button
               onClick={onClose}
@@ -111,32 +112,43 @@ export function RufloDeprecationModal({ onClose }: RufloDeprecationModalProps) {
           {!confirmStep ? (
             <>
               <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                RuFlo injected configuration files, hooks, and settings into your projects that
-                caused instability and unexpected behavior. Removing it will:
+                RuFlo injected configuration files, hooks, and helper scripts into your projects.
+                The cleanup is <strong>surgical</strong> — it only touches files that contain
+                ruflo markers, leaving your own content untouched:
               </p>
 
               <div className="space-y-2 text-xs" style={{ color: 'var(--text-secondary)' }}>
                 <div className="flex items-start gap-2 px-3 py-2 rounded-lg" style={{ background: 'var(--bg-primary)' }}>
                   <span style={{ color: '#ef4444' }}>&#x2022;</span>
-                  <span>Delete <strong>.claude/</strong> and <strong>.codex/</strong> directories (settings, hooks, permissions)</span>
+                  <span>Delete <strong>.claude-flow/</strong>, <strong>.ruflo/</strong>, <strong>.hive-mind/</strong>, <strong>.devcortex-cli/</strong> directories</span>
                 </div>
                 <div className="flex items-start gap-2 px-3 py-2 rounded-lg" style={{ background: 'var(--bg-primary)' }}>
                   <span style={{ color: '#ef4444' }}>&#x2022;</span>
-                  <span>Delete <strong>CLAUDE.md</strong> and <strong>AGENTS.md</strong> project instructions</span>
+                  <span>Scan <strong>.claude/commands/</strong>, <strong>.claude/agents/</strong>, <strong>.claude/skills/</strong>, <strong>.claude/helpers/</strong> and delete only ruflo-marked files</span>
                 </div>
                 <div className="flex items-start gap-2 px-3 py-2 rounded-lg" style={{ background: 'var(--bg-primary)' }}>
                   <span style={{ color: '#ef4444' }}>&#x2022;</span>
-                  <span>Remove <strong>.claude-flow/</strong>, <strong>.ruflo/</strong>, and related directories</span>
+                  <span>Strip ruflo hooks from <strong>.claude/settings.json</strong> and ruflo entries from <strong>.mcp.json</strong> (files kept if user content remains)</span>
                 </div>
                 <div className="flex items-start gap-2 px-3 py-2 rounded-lg" style={{ background: 'var(--bg-primary)' }}>
                   <span style={{ color: '#ef4444' }}>&#x2022;</span>
-                  <span>Deregister ruflo/claude-flow MCP servers</span>
+                  <span>Deregister ruflo / claude-flow / devcortex MCP servers</span>
+                </div>
+                <div className="flex items-start gap-2 px-3 py-2 rounded-lg" style={{ background: '#22c55e10', border: '1px solid #22c55e30' }}>
+                  <span style={{ color: '#22c55e' }}>&#x2713;</span>
+                  <span>
+                    Never touched: <strong>CLAUDE.md</strong>, <strong>AGENTS.md</strong>,
+                    <strong> .codex/</strong>, <strong>.claude/rules/</strong>,
+                    <strong> .claude/memory/</strong>, <strong>settings.local.json</strong>,
+                    and any file without ruflo markers
+                  </span>
                 </div>
               </div>
 
               <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
-                Claude and Codex will ask you to trust each folder again on next use and create
-                fresh default settings. This applies to <strong>all</strong> projects registered in OctoAlly.
+                <strong>CLAUDE.md</strong> and <strong>AGENTS.md</strong> often contain mixed
+                user + ruflo content and must be cleaned manually after the cleanup runs. This
+                applies to all projects registered in OctoAlly.
               </p>
 
               {removeAllMutation.isError && (
@@ -179,8 +191,9 @@ export function RufloDeprecationModal({ onClose }: RufloDeprecationModalProps) {
           ) : (
             <>
               <p className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                Type <strong>REMOVE</strong> to confirm you want to reset Claude and Codex settings
-                for all projects.
+                Type <strong>REMOVE</strong> to confirm the surgical ruflo cleanup across all
+                projects. Your own files (CLAUDE.md, AGENTS.md, .codex/, rules, memory) will
+                not be touched.
               </p>
 
               <input

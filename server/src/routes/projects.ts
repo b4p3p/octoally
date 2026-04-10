@@ -1,11 +1,11 @@
 import { FastifyPluginAsync } from 'fastify';
 import { getDb } from '../db/index.js';
 import { nanoid } from 'nanoid';
-import { readdir, mkdir, readFile, writeFile, rm, unlink, copyFile } from 'fs/promises';
+import { readdir, mkdir, readFile, writeFile, rm, unlink } from 'fs/promises';
 import { join, resolve, basename } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, readdirSync, lstatSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, readdirSync, lstatSync, unlinkSync, rmdirSync } from 'fs';
 import { promisify } from 'util';
 import { getSetting } from './settings.js';
 import { installDefaultAgents } from '../data/default-agents.js';
@@ -55,9 +55,49 @@ function migrateSettingsHookPaths(projectPath: string): string | null {
 }
 
 
+/** True if a hook entry matches ruflo/claude-flow (checks matcher + command). */
+function isRufloHookEntry(entry: any): boolean {
+  const matcherStr = (entry?.matcher || '').toLowerCase();
+  if (
+    matcherStr.includes('devcortex') ||
+    matcherStr.includes('ruflo') ||
+    matcherStr.includes('claude-flow') ||
+    matcherStr.includes('hive-mind') ||
+    matcherStr.includes('hive_mind')
+  ) return true;
+  const hooks = entry?.hooks || [];
+  return hooks.some((h: any) =>
+    h?.command && (
+      h.command.includes('ruflo') ||
+      h.command.includes('claude-flow') ||
+      h.command.includes('hook-handler.cjs') ||
+      h.command.includes('devcortex') ||
+      h.command.includes('.hivecommand') ||
+      h.command.includes('sona') ||
+      h.command.includes('hive-cleanup') ||
+      h.command.includes('memory-sync') ||
+      h.command.includes('auto-memory') ||
+      h.command.includes('debate-gate') ||
+      h.command.includes('graph-state') ||
+      h.command.includes('intelligence-hook') ||
+      h.command.includes('ranked-context') ||
+      h.command.includes('.claude/helpers/')
+    )
+  );
+}
+
 /**
- * Strip ruflo-managed hooks from .claude/settings.json while preserving user config.
- * Returns list of removed hook descriptions for logging.
+ * Strip ALL ruflo/claude-flow contamination from .claude/settings.json while
+ * preserving user config. This is broader than just hooks — ruflo stamps many
+ * top-level fields on the settings file:
+ *   - `claudeFlow` (entire ruflo config block)
+ *   - `attribution` (commit/PR attribution to claude-flow)
+ *   - `env.CLAUDE_FLOW_*` and `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`
+ *   - `statusLine` pointing to `.claude/helpers/` (broken after helpers wipe)
+ *   - `permissions.allow` entries referencing claude-flow / ruflo
+ *   - `hooks` entries handled by isRufloHookEntry
+ *
+ * Returns a list of removed fields for logging.
  */
 function stripRufloHooks(projectPath: string): string[] {
   const settingsPath = join(projectPath, '.claude', 'settings.json');
@@ -65,49 +105,102 @@ function stripRufloHooks(projectPath: string): string[] {
   try {
     const raw = readFileSync(settingsPath, 'utf-8');
     const parsed = JSON.parse(raw);
-    if (!parsed.hooks) return [];
     const removed: string[] = [];
-    for (const [hookType, entries] of Object.entries(parsed.hooks) as [string, any[]][]) {
-      if (!Array.isArray(entries)) continue;
-      parsed.hooks[hookType] = entries.filter((entry: any) => {
-        const hooks = entry.hooks || [];
-        // Check both command content AND matcher for ruflo/devcortex references
-        const matcherStr = (entry.matcher || '').toLowerCase();
-        const isMatcherRuflo = matcherStr.includes('devcortex') ||
-          matcherStr.includes('ruflo') ||
-          matcherStr.includes('claude-flow') ||
-          matcherStr.includes('hive-mind') ||
-          matcherStr.includes('hive_mind');
-        const isRuflo = isMatcherRuflo || hooks.some((h: any) =>
-          h.command && (
-            h.command.includes('ruflo') ||
-            h.command.includes('claude-flow') ||
-            h.command.includes('hook-handler.cjs') ||
-            h.command.includes('devcortex') ||
-            h.command.includes('.hivecommand') ||
-            h.command.includes('sona') ||
-            h.command.includes('hive-cleanup') ||
-            h.command.includes('memory-sync') ||
-            h.command.includes('auto-memory') ||
-            h.command.includes('debate-gate') ||
-            h.command.includes('graph-state') ||
-            h.command.includes('intelligence-hook') ||
-            h.command.includes('ranked-context')
-          )
-        );
-        if (isRuflo) {
-          removed.push(`${hookType}: ${entry.matcher || '(all)'}`);
-        }
-        return !isRuflo;
-      });
-      // Remove empty arrays
-      if (parsed.hooks[hookType].length === 0) {
-        delete parsed.hooks[hookType];
+
+    // 1) Top-level ruflo config block
+    if (parsed.claudeFlow !== undefined) {
+      delete parsed.claudeFlow;
+      removed.push('claudeFlow block');
+    }
+    if (parsed.claude_flow !== undefined) {
+      delete parsed.claude_flow;
+      removed.push('claude_flow block');
+    }
+
+    // 2) Attribution block — drop if it references claude-flow/ruflo
+    if (parsed.attribution && typeof parsed.attribution === 'object') {
+      const json = JSON.stringify(parsed.attribution).toLowerCase();
+      if (json.includes('claude-flow') || json.includes('ruflo') || json.includes('ruv.net')) {
+        delete parsed.attribution;
+        removed.push('attribution block');
       }
     }
-    if (Object.keys(parsed.hooks).length === 0) {
-      delete parsed.hooks;
+
+    // 3) env vars — drop CLAUDE_FLOW_* and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+    if (parsed.env && typeof parsed.env === 'object') {
+      for (const key of Object.keys(parsed.env)) {
+        if (
+          key.startsWith('CLAUDE_FLOW_') ||
+          key === 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS' ||
+          key.startsWith('RUFLO_') ||
+          key.startsWith('HIVE_MIND_') ||
+          key.startsWith('DEVCORTEX_')
+        ) {
+          delete parsed.env[key];
+          removed.push(`env.${key}`);
+        }
+      }
+      if (Object.keys(parsed.env).length === 0) delete parsed.env;
     }
+
+    // 4) statusLine pointing to .claude/helpers/ (broken after helpers wipe)
+    if (parsed.statusLine && typeof parsed.statusLine === 'object') {
+      const cmd = String(parsed.statusLine.command || '');
+      if (cmd.includes('.claude/helpers/') || cmd.includes('statusline.cjs') || cmd.includes('claude-flow') || cmd.includes('ruflo')) {
+        delete parsed.statusLine;
+        removed.push('statusLine (pointed to ruflo helper)');
+      }
+    }
+
+    // 5) permissions.allow — strip ruflo-specific entries
+    if (parsed.permissions && typeof parsed.permissions === 'object' && Array.isArray(parsed.permissions.allow)) {
+      const before = parsed.permissions.allow.length;
+      parsed.permissions.allow = parsed.permissions.allow.filter((p: any) => {
+        if (typeof p !== 'string') return true;
+        const lower = p.toLowerCase();
+        return !(
+          lower.includes('claude-flow') ||
+          lower.includes('claude_flow') ||
+          lower.includes('ruflo') ||
+          lower.includes('hive-mind') ||
+          lower.includes('devcortex') ||
+          lower.includes('mcp__claude-flow') ||
+          lower.includes('mcp__ruflo') ||
+          lower.startsWith('bash(node .claude/') ||
+          lower.includes('@claude-flow')
+        );
+      });
+      const after = parsed.permissions.allow.length;
+      if (after !== before) {
+        removed.push(`${before - after} ruflo permission(s)`);
+      }
+      if (parsed.permissions.allow.length === 0) {
+        delete parsed.permissions.allow;
+      }
+      if (Object.keys(parsed.permissions).length === 0) {
+        delete parsed.permissions;
+      }
+    }
+
+    // 6) hooks — existing per-entry filter (kept as before)
+    if (parsed.hooks && typeof parsed.hooks === 'object') {
+      for (const [hookType, entries] of Object.entries(parsed.hooks) as [string, any[]][]) {
+        if (!Array.isArray(entries)) continue;
+        const before = entries.length;
+        parsed.hooks[hookType] = entries.filter((entry: any) => !isRufloHookEntry(entry));
+        const after = parsed.hooks[hookType].length;
+        if (after !== before) {
+          removed.push(`${before - after} hook(s) in ${hookType}`);
+        }
+        if (parsed.hooks[hookType].length === 0) {
+          delete parsed.hooks[hookType];
+        }
+      }
+      if (Object.keys(parsed.hooks).length === 0) {
+        delete parsed.hooks;
+      }
+    }
+
     if (removed.length > 0) {
       writeFileSync(settingsPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
     }
@@ -118,32 +211,254 @@ function stripRufloHooks(projectPath: string): string[] {
 }
 
 /**
- * Remove ruflo/devcortex artifacts from a single project.
+ * Markers that identify ruflo/claude-flow/hive-mind/devcortex content inside a file.
+ * Used by the surgical cleanup to tell ruflo files from user files by content.
+ * Case-insensitive substring match — prefer long, unambiguous phrases over short
+ * tokens to avoid false positives on user code.
+ */
+const RUFLO_CONTENT_MARKERS = [
+  // Core ruflo / claude-flow names
+  'claude-flow',
+  'claude_flow',
+  'claude flow',                              // catches "Claude Flow Agent Router"
+  'ruflo',
+  'ruvnet',                                   // github.com/ruvnet/ruflo
+  'ruv-swarm',                                // legacy alias
+  'hive-mind',
+  'hive_mind',
+  'devcortex',
+  '@claude-flow/cli',
+  'CLAUDE_FLOW_MODE',
+  'CLAUDE_FLOW_HOOKS_ENABLED',
+  'agentic-flow',                             // agentic-flow package
+
+  // MCP namespaces unique to ruflo
+  'mcp__claude-flow',
+  'mcp__ruflo',
+  'mcp__claude_flow',
+  'mcp__agentic-flow',
+  'mcp__ruflo',
+
+  // Ruflo boilerplate phrases (long & unambiguous)
+  'RuFlo V3',
+  'Claude Flow powered',
+  'Multi-agent orchestration framework for agentic coding',
+  'Claude Code Configuration - RuFlo',
+  'Swarm Orchestration Platform',
+
+  // Ruflo ecosystem sub-projects (long enough to be unambiguous)
+  'AgentDB',                                  // agentdb vector db
+  'ReasoningBank',                            // reasoningbank learning
+  'sublinear solvers',                        // sublinear algorithms
+  'flow-nexus',
+  'agent-browser',                            // browser-agent ruflo package
+
+  // Ruflo-specific helpers / scripts
+  'hook-handler.cjs',
+  'sona-bridge',
+  'V3 Helper Alias Script',                   // .claude/helpers/v3.sh header
+  'HELPERS_DIR=".claude',                     // common pattern in ruflo shell helpers
+  'standard-checkpoint-hooks',
+  'checkpoint-manager',
+  'auto-memory-hook',
+  'learning-optimizer',
+  'pattern-consolidator',
+
+  // Ruflo-specific agent names and phrases
+  'tdd-london-swarm',
+  'byzantine-coordinator',
+  'consensus-coordinator',
+  'gossip-coordinator',
+  'crdt-synchronizer',
+  'raft-manager',
+  'quorum-manager',
+  'performance-benchmarker',
+  'pagerank-analyzer',
+  'trading-predictor',
+  'matrix-optimizer',
+  'sparc-coder',
+  'sparc-coord',
+  'hierarchical-coordinator',
+  'mesh-coordinator',
+  'adaptive-coordinator',
+  'collective-intelligence-coordinator',
+  'swarm-memory-manager',
+  'aidefence-guardian',
+  'production-validator',
+  'Distributed consensus',                    // common opening in ruflo consensus agents
+
+  // Ruflo default-agent frontmatter markers (structural — very unlikely in
+  // user-created agents): the ruflo installer stamps `author: "Claude Code"`
+  // on every default agent it ships, and uses ruflo-specific MCP namespaces.
+  'author: "Claude Code"',
+  "author: 'Claude Code'",
+  'mcp__agentic-',
+  'mcp__ruflo-',
+  'mcp__claude-flow-',
+
+  // Known ruflo default subagent slugs (shipped with every ruflo install).
+  // These are listed in the ruflo subagent catalog and users would not
+  // recreate them verbatim in their own files.
+  'test-long-runner',
+];
+
+/** Scan a utf-8 text for ruflo markers. Empty/unreadable → false (safe). */
+function isRufloContent(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  for (const m of RUFLO_CONTENT_MARKERS) {
+    if (lower.includes(m.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/** Read a file as utf-8, swallow errors, return '' if unreadable or too big. */
+function safeReadText(filePath: string): string {
+  try {
+    const st = lstatSync(filePath);
+    if (!st.isFile()) return '';
+    // Cap at 2 MB — ruflo helpers are always smaller, and we don't want to slurp
+    // huge user binaries by accident.
+    if (st.size > 2 * 1024 * 1024) return '';
+    return readFileSync(filePath, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Recursively walk `dir` and delete any file whose content matches `isRufloContent`.
+ * Empty directories are removed bottom-up afterwards. Symlinks and unreadable
+ * files are left untouched. Never follows symlinks into unexpected places.
+ * Returns the relative paths of the files that were removed (for logging).
+ */
+function cleanRufloFilesInDir(projectPath: string, relDir: string, cleaned: string[]): void {
+  const fullDir = join(projectPath, relDir);
+  if (!existsSync(fullDir)) return;
+
+  const walk = (absDir: string): void => {
+    let entries: string[] = [];
+    try { entries = readdirSync(absDir); } catch { return; }
+    for (const name of entries) {
+      const abs = join(absDir, name);
+      let st;
+      try { st = lstatSync(abs); } catch { continue; }
+      if (st.isSymbolicLink()) continue; // never follow/delete symlinks
+      if (st.isDirectory()) {
+        walk(abs);
+        // Remove dir if empty after recursion
+        try {
+          const remaining = readdirSync(abs);
+          if (remaining.length === 0) {
+            try { rmdirSync(abs); cleaned.push(`removed empty dir ${abs.slice(projectPath.length + 1)}/`); } catch {}
+          }
+        } catch {}
+        continue;
+      }
+      if (!st.isFile()) continue;
+      const text = safeReadText(abs);
+      if (isRufloContent(text)) {
+        try {
+          unlinkSync(abs);
+          cleaned.push(`removed ${abs.slice(projectPath.length + 1)}`);
+        } catch { /* non-fatal */ }
+      }
+    }
+  };
+
+  walk(fullDir);
+
+  // Final pass: if the root dir itself ended up empty, remove it too.
+  try {
+    const remaining = readdirSync(fullDir);
+    if (remaining.length === 0) {
+      rmdirSync(fullDir);
+      cleaned.push(`removed empty dir ${relDir}/`);
+    }
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Strip ruflo/claude-flow entries from .mcp.json without touching user entries.
+ * If the resulting mcpServers object is empty, the whole file is removed.
+ */
+function stripRufloFromMcpJson(projectPath: string): string | null {
+  const mcpPath = join(projectPath, '.mcp.json');
+  if (!existsSync(mcpPath)) return null;
+  try {
+    const raw = readFileSync(mcpPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.mcpServers || typeof parsed.mcpServers !== 'object') {
+      return null;
+    }
+    const removed: string[] = [];
+    for (const key of Object.keys(parsed.mcpServers)) {
+      const kLower = key.toLowerCase();
+      if (
+        kLower.includes('claude-flow') ||
+        kLower.includes('claude_flow') ||
+        kLower.includes('ruflo') ||
+        kLower.includes('devcortex') ||
+        kLower.includes('hive-mind') ||
+        kLower.includes('hive_mind')
+      ) {
+        delete parsed.mcpServers[key];
+        removed.push(key);
+        continue;
+      }
+      // Also scan the entry's command/args for ruflo markers — catches
+      // entries that are named generically but run ruflo.
+      const entryJson = JSON.stringify(parsed.mcpServers[key]);
+      if (isRufloContent(entryJson)) {
+        delete parsed.mcpServers[key];
+        removed.push(`${key} (ruflo-marked)`);
+      }
+    }
+    if (removed.length === 0) return null;
+    if (Object.keys(parsed.mcpServers).length === 0) {
+      // No user entries left — drop the file.
+      unlinkSync(mcpPath);
+      return `removed .mcp.json (only contained: ${removed.join(', ')})`;
+    }
+    writeFileSync(mcpPath, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
+    return `.mcp.json: stripped ${removed.join(', ')}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove ruflo/devcortex artifacts from a single project — SURGICAL mode.
+ *
+ * Safety contract:
+ *   NEVER touched: CLAUDE.md, AGENTS.md, .codex/, .claude/rules/, .claude/memory/,
+ *                  .claude/settings.local.json, or any file without a ruflo marker.
+ *   MODIFIED in place (not deleted): .claude/settings.json, .mcp.json
+ *   DELETED wholesale (pure ruflo): .claude-flow/, .ruflo/, .hive-mind/, .devcortex-cli/
+ *                                   .devcortex, claude-flow.config.json, ruvector.db
+ *   SCANNED by content: .claude/commands/, .claude/agents/, .claude/skills/,
+ *                       .claude/helpers/ — only files with ruflo markers are removed.
+ *
  * Returns a list of cleaned items for logging.
  */
 async function cleanRufloFromProject(projectPath: string): Promise<string[]> {
   const cleaned: string[] = [];
 
-  // Backup and remove .claude/settings.json (ruflo polluted it with hooks)
-  // Leave the rest of .claude/ intact — rules, skills, agents, commands are user content
-  const claudeSettings = join(projectPath, '.claude', 'settings.json');
-  if (existsSync(claudeSettings)) {
-    try {
-      await copyFile(claudeSettings, join(projectPath, '.claude', 'settings.json.pre-cleanup-backup'));
-      await unlink(claudeSettings);
-      cleaned.push('backed up and removed .claude/settings.json');
-    } catch { /* non-fatal */ }
-  }
-
-  // Nuke all ruflo/claude-flow directories (.swarm/ is kept — used by octoally-swarm)
-  const dirsToRemove = [
+  // --- A) Pure-ruflo directories: safe to nuke wholesale -------------------
+  // Note: `.claude/helpers/` and `.claude/agents/templates/` are included
+  // because Claude Code itself does not populate these by default — any
+  // content there was installed by ruflo/claude-flow/devcortex. User content
+  // belongs in `.claude/rules/`, `.claude/memory/`, project root, or custom
+  // subdirectories the user explicitly created.
+  const pureRufloDirs = [
     '.claude-flow',
-    '.codex',
     '.devcortex-cli',
     '.hive-mind',
     '.ruflo',
+    '.claude/helpers',
+    '.claude/agents/templates',
   ];
-  for (const dir of dirsToRemove) {
+  for (const dir of pureRufloDirs) {
     const fullPath = join(projectPath, dir);
     if (existsSync(fullPath)) {
       try {
@@ -153,22 +468,13 @@ async function cleanRufloFromProject(projectPath: string): Promise<string[]> {
     }
   }
 
-  // Remove all ruflo-related files
-  const filesToRemove = [
-    'CLAUDE.md',
-    'AGENTS.md',
+  // --- B) Pure-ruflo files: safe to delete ---------------------------------
+  const pureRufloFiles = [
     '.devcortex',
     'claude-flow.config.json',
-    '.mcp.json',
-    'hooks/on-tool-use.sh',
     'ruvector.db',
-    '.claude/helpers/hook-handler.cjs',
-    '.claude/helpers/learning-service.mjs',
-    '.claude/helpers/learning-hooks.sh',
-    '.claude/helpers/sona-bridge.cjs',
-    '.claude/helpers/intelligence.cjs',
   ];
-  for (const file of filesToRemove) {
+  for (const file of pureRufloFiles) {
     const fullPath = join(projectPath, file);
     if (existsSync(fullPath)) {
       try {
@@ -178,19 +484,41 @@ async function cleanRufloFromProject(projectPath: string): Promise<string[]> {
     }
   }
 
-  // Remove hooks/ directory if empty (not a standard folder — was added by OctoAlly)
-  const hooksDir = join(projectPath, 'hooks');
-  if (existsSync(hooksDir)) {
+  // --- C) Surgical modify-in-place -----------------------------------------
+  // C.1: .claude/settings.json → strip all ruflo-injected fields in place.
+  const strippedFields = stripRufloHooks(projectPath);
+  if (strippedFields.length > 0) {
+    cleaned.push(`.claude/settings.json: stripped ${strippedFields.join(', ')}`);
+    // If the resulting file is now an empty {} object, remove it so
+    // Claude Code will recreate a fresh default on next use.
+    const settingsPath = join(projectPath, '.claude', 'settings.json');
     try {
-      const remaining = readdirSync(hooksDir);
-      if (remaining.length === 0) {
-        await rm(hooksDir, { recursive: true });
-        cleaned.push('removed empty hooks/');
+      const after = readFileSync(settingsPath, 'utf-8').trim();
+      if (after === '{}' || after === '') {
+        unlinkSync(settingsPath);
+        cleaned.push('.claude/settings.json: removed (empty after strip)');
       }
     } catch { /* non-fatal */ }
   }
 
-  // Deregister ruflo/devcortex/claude-flow MCP servers (idempotent)
+  // C.2: .mcp.json → strip ruflo/claude-flow entries
+  const mcpResult = stripRufloFromMcpJson(projectPath);
+  if (mcpResult) cleaned.push(mcpResult);
+
+  // --- D) Content-scan directories: delete ONLY ruflo-marked files ---------
+  //   NOTE: CLAUDE.md and AGENTS.md are NOT in this list. They often contain
+  //   mixed user/ruflo content and MUST be cleaned manually by the user.
+  //   `.claude/helpers/` is handled by step A (full wipe).
+  const scanDirs = [
+    '.claude/commands',
+    '.claude/agents',
+    '.claude/skills',
+  ];
+  for (const relDir of scanDirs) {
+    cleanRufloFilesInDir(projectPath, relDir, cleaned);
+  }
+
+  // --- E) MCP deregister (idempotent) --------------------------------------
   for (const server of ['ruflo', 'devcortex', 'claude-flow']) {
     try {
       await execFileAsync('claude', ['mcp', 'remove', server], {
@@ -206,24 +534,49 @@ async function cleanRufloFromProject(projectPath: string): Promise<string[]> {
 
 /** Check if ruflo/claude-flow artifacts exist at a project path. */
 function hasRufloArtifacts(projectPath: string): boolean {
-  if (existsSync(join(projectPath, '.claude-flow')) ||
-    existsSync(join(projectPath, '.ruflo')) ||
-    existsSync(join(projectPath, '.hive-mind')) ||
-    existsSync(join(projectPath, '.devcortex-cli'))) return true;
+  // Pure-ruflo directories
+  const rufloDirs = ['.claude-flow', '.ruflo', '.hive-mind', '.devcortex-cli'];
+  for (const d of rufloDirs) {
+    if (existsSync(join(projectPath, d))) return true;
+  }
 
-  // Check CLAUDE.md for ruflo markers
-  try {
-    const content = readFileSync(join(projectPath, 'CLAUDE.md'), 'utf-8');
-    if (content.includes('RuFlo') || content.includes('claude-flow') ||
-      content.includes('Swarm Orchestration') || content.includes('hive-mind')) return true;
-  } catch { /* file doesn't exist */ }
+  // Pure-ruflo top-level files
+  const rufloFiles = ['.devcortex', 'claude-flow.config.json', 'ruvector.db'];
+  for (const f of rufloFiles) {
+    if (existsSync(join(projectPath, f))) return true;
+  }
 
-  // Check .claude/settings.json for claude-flow references
-  try {
-    const content = readFileSync(join(projectPath, '.claude', 'settings.json'), 'utf-8');
-    if (content.includes('claude-flow') || content.includes('ruflo') ||
-      content.includes('claudeFlow')) return true;
-  } catch { /* file doesn't exist */ }
+  // Known ruflo helper scripts under .claude/helpers/
+  const rufloHelpers = [
+    '.claude/helpers/hook-handler.cjs',
+    '.claude/helpers/sona-bridge.cjs',
+    '.claude/helpers/learning-service.mjs',
+    '.claude/helpers/intelligence.cjs',
+  ];
+  for (const h of rufloHelpers) {
+    if (existsSync(join(projectPath, h))) return true;
+  }
+
+  // Well-known ruflo commands at the top of .claude/commands/
+  const rufloCommands = [
+    '.claude/commands/claude-flow-help.md',
+    '.claude/commands/claude-flow-memory.md',
+    '.claude/commands/claude-flow-swarm.md',
+  ];
+  for (const c of rufloCommands) {
+    if (existsSync(join(projectPath, c))) return true;
+  }
+
+  // Content scan: CLAUDE.md — flag if it contains ruflo markers, even if
+  // the file also has user content. We won't auto-delete it; we only use
+  // this flag to keep the modal visible until the user cleans it.
+  if (isRufloContent(safeReadText(join(projectPath, 'CLAUDE.md')))) return true;
+
+  // Content scan: .claude/settings.json for claude-flow references
+  if (isRufloContent(safeReadText(join(projectPath, '.claude', 'settings.json')))) return true;
+
+  // Content scan: .mcp.json for claude-flow entries
+  if (isRufloContent(safeReadText(join(projectPath, '.mcp.json')))) return true;
 
   return false;
 }
@@ -447,7 +800,9 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       }
     }
 
-    // Remove ruflo-generated global CLAUDE.md files
+    // Global CLAUDE.md files are intentionally NOT deleted here — they can
+    // contain mixed user+ruflo content and require manual cleanup. We only
+    // flag them so the user knows where to look.
     const globalClaudeMdFiles = [
       join(homedir(), 'CLAUDE.md'),
       join(homedir(), '.claude', 'CLAUDE.md'),
@@ -456,9 +811,8 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       if (existsSync(file)) {
         try {
           const content = readFileSync(file, 'utf-8');
-          if (content.includes('ruflo') || content.includes('CLAUDE-FLOW') || content.includes('claude-flow') || content.includes('RuFlo')) {
-            await unlink(file);
-            globalCleaned.push(`removed ${file}`);
+          if (isRufloContent(content)) {
+            globalCleaned.push(`flagged (manual review needed): ${file}`);
           }
         } catch { /* non-fatal */ }
       }
