@@ -146,11 +146,16 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
     initialized?.activeMode ?? 'terminal'
   );
 
-  // Discover external sessions available for adoption (on-demand only, no polling)
+  // Discover external sessions available for adoption.
+  // Auto-poll on a slow interval so popped-out sessions surface a "Bring back"
+  // affordance without requiring a manual scan; user can still trigger an
+  // immediate refresh by opening the dropdown.
   const { data: discoverableData, refetch: refetchDiscoverable } = useQuery({
     queryKey: ['discoverable-sessions', projectPath],
     queryFn: () => api.sessions.discoverable(projectPath),
-    enabled: false, // on-demand only — triggered by user clicking "Scan"
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
   });
   const discoverableSessions = discoverableData?.sessions || [];
 
@@ -164,6 +169,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   const [showLauncher, setShowLauncher] = useState(
     initialized?.showLauncher ?? true
   );
+  const [pendingLaunch, setPendingLaunch] = useState<{ mode: 'agent' | 'session'; cliType: 'claude' | 'codex' } | null>(null);
   const [showAllTerminals, setShowAllTerminals] = useState(false);
   const [expandedTerminalId, setExpandedTerminalId] = useState<string | null>(null);
   const [gridFocusedId, setGridFocusedId] = useState<string | null>(null);
@@ -350,6 +356,12 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
             }
           })
           .catch((err) => console.error(`[QuickLaunch] Failed to create terminal:`, err));
+      } else if (type === 'agent') {
+        // Agents need an explicit pick — open the launcher's wizard instead of
+        // auto-creating with a hardcoded agent name (the historical 'coder'
+        // default was a ruflo agent that no longer exists in the default set).
+        setShowLauncher(true);
+        setPendingLaunch({ mode: 'agent', cliType });
       } else {
         const cfPrompt = (project?.session_prompt ?? '').trim();
         const defaultTask = 'Start up and ask me what I want you to do and NOTHING ELSE';
@@ -359,8 +371,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
         api.sessions.create({
           project_path: projectPath,
           task,
-          mode: type === 'agent' ? 'agent' : 'session',
-          agent_type: type === 'agent' ? 'coder' : undefined,
+          mode: 'session',
           project_id: projectId,
           cli_type: cliType,
         })
@@ -982,6 +993,35 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                   </button>
                 )}
 
+                {/* Bring-back pill — surfaces popped-out / external sessions for this project
+                    so the user has a one-click path back without knowing about the Scan icon. */}
+                {discoverableSessions.length > 0 && (
+                  <button
+                    onClick={async () => {
+                      // If exactly one popped-out session, re-adopt directly.
+                      // Otherwise open the dropdown so the user picks.
+                      if (discoverableSessions.length === 1) {
+                        await handleAdoptSession(discoverableSessions[0].socketPath);
+                      } else {
+                        setShowAdoptMenu(true);
+                      }
+                    }}
+                    className="flex items-center gap-1.5 px-2 rounded-md shrink-0 transition-colors text-xs font-medium"
+                    title={`${discoverableSessions.length} session(s) running outside OctoAlly — click to bring back`}
+                    style={{
+                      height: 28,
+                      color: '#f59e0b',
+                      background: 'rgba(245, 158, 11, 0.12)',
+                      border: '1px solid rgba(245, 158, 11, 0.35)',
+                    }}
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    <span>
+                      Bring back{discoverableSessions.length > 1 ? ` (${discoverableSessions.length})` : ''}
+                    </span>
+                  </button>
+                )}
+
                 {/* Adopt external session button — on-demand scan */}
                 <div ref={adoptMenuRef}>
                   <button
@@ -1234,6 +1274,9 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                     project={project}
                     onSessionCreated={handleSessionCreated}
                     onWebPageCreated={handleWebPageCreated}
+                    pendingLaunchMode={pendingLaunch?.mode ?? null}
+                    pendingLaunchCliType={pendingLaunch?.cliType}
+                    onPendingLaunchHandled={() => setPendingLaunch(null)}
                   />
                 </div>
               )}

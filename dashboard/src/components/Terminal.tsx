@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Mic, MicOff, Loader2, RotateCcw, ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
+
+const POPOUT_SKIP_KEY = 'octoally-popout-confirm-skip';
+function shouldSkipPopOutConfirm(): boolean {
+  try { return localStorage.getItem(POPOUT_SKIP_KEY) === 'true'; } catch { return false; }
+}
+function setSkipPopOutConfirm(skip: boolean): void {
+  try { localStorage.setItem(POPOUT_SKIP_KEY, String(skip)); } catch { /* ignore */ }
+}
 import { useSpeechStore, toggleMic, stopMic } from '../lib/speech';
 import { api } from '../lib/api';
 import { HistoryViewer } from './HistoryViewer';
@@ -166,6 +175,26 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   });
   const configuredFontSize = Number(settingsData?.settings?.terminal_font_size) || 13;
   const [showHistory, setShowHistory] = useState(false);
+  const [popOutConfirm, setPopOutConfirm] = useState(false);
+  const [popOutSkipChecked, setPopOutSkipChecked] = useState(false);
+
+  async function doPopOut() {
+    setPopOutConfirm(false);
+    if (popOutSkipChecked) setSkipPopOutConfirm(true);
+    try {
+      const result = await api.sessions.popOut(sessionId);
+      if (result.ok) onPopOut?.();
+    } catch { /* ignore */ }
+  }
+
+  function handlePopOutClick() {
+    if (shouldSkipPopOutConfirm()) {
+      void doPopOut();
+    } else {
+      setPopOutSkipChecked(false);
+      setPopOutConfirm(true);
+    }
+  }
 
   // Expose connect/disconnect so the suspension effect can control it
   const connectFnRef = useRef<(() => void) | null>(null);
@@ -879,15 +908,10 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
               <ZoomIn className="w-3 h-3" />
             </button>
             <button
-              onClick={async () => {
-                try {
-                  const result = await api.sessions.popOut(sessionId);
-                  if (result.ok) onPopOut?.();
-                } catch { /* ignore */ }
-              }}
+              onClick={handlePopOutClick}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
-              style={{ background: 'var(--accent)', color: 'white' }}
-              title="Pop out to system terminal"
+              style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              title="Pop out to system terminal — you can bring it back from the tab bar"
             >
               <ExternalLink className="w-3 h-3" />
             </button>
@@ -953,6 +977,58 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       />
       {showHistory && (
         <HistoryViewer sessionId={sessionId} onClose={() => setShowHistory(false)} />
+      )}
+      {popOutConfirm && createPortal(
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setPopOutConfirm(false)}
+        >
+          <div
+            className="rounded-lg border shadow-2xl max-w-md w-full mx-4 p-5"
+            style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <ExternalLink className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+              <h3 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>
+                Pop out to system terminal?
+              </h3>
+            </div>
+            <p className="text-sm mb-3" style={{ color: 'var(--text-secondary)' }}>
+              The session will keep running in your default system terminal (gnome-terminal, iTerm2, …).
+              OctoAlly will close this tab.
+            </p>
+            <p className="text-sm mb-4" style={{ color: 'var(--text-secondary)' }}>
+              You can bring it back any time from the <strong style={{ color: 'var(--text-primary)' }}>scan icon</strong> in the tab bar — it will appear under <em>External</em>.
+            </p>
+            <label className="flex items-center gap-2 mb-4 text-xs cursor-pointer select-none" style={{ color: 'var(--text-secondary)' }}>
+              <input
+                type="checkbox"
+                checked={popOutSkipChecked}
+                onChange={(e) => setPopOutSkipChecked(e.target.checked)}
+              />
+              Don't ask again
+            </label>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setPopOutConfirm(false)}
+                className="px-3 py-1.5 rounded text-sm transition-colors hover:bg-white/5"
+                style={{ color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void doPopOut()}
+                className="px-3 py-1.5 rounded text-sm transition-colors"
+                style={{ background: 'var(--accent)', color: 'white' }}
+              >
+                Pop out
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
       )}
     </div>
   );

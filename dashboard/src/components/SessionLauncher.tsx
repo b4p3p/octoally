@@ -10,6 +10,12 @@ interface SessionLauncherProps {
   project: Project;
   onSessionCreated: (sessionId: string, projectName?: string, mode?: 'session' | 'terminal') => void;
   onWebPageCreated?: (url: string) => void;
+  // External trigger: open the TaskModal in the given mode/CLI when set
+  // (e.g. clicking the "Claude Agent" quick-launch on a project card).
+  // The launcher calls onPendingLaunchHandled after consuming it.
+  pendingLaunchMode?: LaunchMode;
+  pendingLaunchCliType?: 'claude' | 'codex';
+  onPendingLaunchHandled?: () => void;
 }
 
 type LaunchMode = 'session' | 'agent' | null;
@@ -680,11 +686,19 @@ function TaskModal({
   );
 }
 
-export function SessionLauncher({ project, onSessionCreated, onWebPageCreated }: SessionLauncherProps) {
+export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, pendingLaunchMode, pendingLaunchCliType, onPendingLaunchHandled }: SessionLauncherProps) {
   const [webUrl, setWebUrl] = useState('');
   const [showOpenClaw, setShowOpenClaw] = useState(false);
-  const [launchMode, setLaunchMode] = useState<LaunchMode>(null);
+  const [launchMode, setLaunchMode] = useState<LaunchMode>(pendingLaunchMode ?? null);
   const queryClient = useQueryClient();
+
+  // Consume external trigger to open TaskModal (e.g. project-card quick-launch).
+  useEffect(() => {
+    if (pendingLaunchMode) {
+      setLaunchMode(pendingLaunchMode);
+      onPendingLaunchHandled?.();
+    }
+  }, [pendingLaunchMode, onPendingLaunchHandled]);
 
   // Fetch available agent types for this project (reads .claude/agents/ — standard Claude Code feature)
   const { data: agentsData } = useQuery({
@@ -973,6 +987,7 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated }:
             project={project}
             agents={agents}
             codexReady={true}
+            initialCliType={pendingLaunchCliType}
             onClose={() => setLaunchMode(null)}
             onLaunch={handleLaunch}
           />
