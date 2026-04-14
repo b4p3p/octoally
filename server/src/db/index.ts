@@ -113,6 +113,39 @@ export function initDb(): void {
   // ruflo deprecation: seed disposition setting
   try { db.exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('ruflo_disposition', 'undecided')"); } catch {}
 
+  // ruflo cleanup follow-up: reset *_command settings that still point to the
+  // legacy ~/.octoally/ruflo-run.sh wrapper. Earlier ruflo-era installs
+  // persisted that path into agent_/session_/hivemind_*_command; the surgical
+  // file cleanup didn't touch the DB, so upgrading users hit "Unknown command"
+  // errors when launching agents (the wrapper rejects Claude CLI flags).
+  // Idempotent — once reset, the LIKE returns no rows.
+  try {
+    const RUFLO_COMMAND_DEFAULTS: Record<string, string> = {
+      session_claude_command: 'claude',
+      session_codex_command: 'codex',
+      agent_claude_command: 'claude',
+      agent_codex_command: 'codex',
+    };
+    const stale = db.prepare(`
+      SELECT key, value FROM settings
+      WHERE value LIKE '%ruflo%'
+        AND (key LIKE '%_command' OR key IN ('ruflo_command', 'hivemind_claude_command', 'hivemind_codex_command'))
+    `).all() as Array<{ key: string; value: string }>;
+    if (stale.length > 0) {
+      const upsert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+      const del = db.prepare('DELETE FROM settings WHERE key = ?');
+      for (const row of stale) {
+        const fallback = RUFLO_COMMAND_DEFAULTS[row.key];
+        if (fallback) {
+          upsert.run(row.key, fallback);
+        } else {
+          del.run(row.key);
+        }
+      }
+      console.log(`📦 Reset ${stale.length} stale ruflo-pointing command setting(s) to defaults`);
+    }
+  } catch { /* non-fatal */ }
+
   // Note: orphaned process cleanup is handled by cleanupStaleRunningSessions()
   // which is called after initDb() in index.ts — it kills processes AND marks DB records.
 
