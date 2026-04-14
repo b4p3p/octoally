@@ -43,8 +43,19 @@ npm run build 2>&1 | tail -1
 # 3. Deploy server to ~/octoally
 log_info "Deploying server..."
 rsync -a --delete "$SRC_DIR/server/dist/" "$INSTALL_DIR/server/dist/"
+cp "$SRC_DIR/server/package.json" "$INSTALL_DIR/server/package.json"
 # Copy new source files that may not exist in install (e.g. utils/)
 rsync -a "$SRC_DIR/server/node_modules/" "$INSTALL_DIR/server/node_modules/" 2>/dev/null || true
+
+# Refresh version.json so cli.mjs / install.sh see the new version
+SRC_VERSION=$(node -e "console.log(require('$SRC_DIR/package.json').version)")
+cat > "$INSTALL_DIR/version.json" <<VJSON
+{
+  "version": "$SRC_VERSION",
+  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "node_version": "$(node --version)"
+}
+VJSON
 
 # 4. Deploy dashboard to ~/octoally
 log_info "Deploying dashboard..."
@@ -57,6 +68,7 @@ if [ -f "$ELECTRON_ASAR" ]; then
   npx --yes @electron/asar extract "$ELECTRON_ASAR" "$TMPDIR/app" 2>/dev/null
   cp "$SRC_DIR/desktop-electron/dist/main.js" "$TMPDIR/app/dist/main.js"
   cp "$SRC_DIR/desktop-electron/dist/main.js.map" "$TMPDIR/app/dist/main.js.map"
+  cp "$SRC_DIR/desktop-electron/package.json" "$TMPDIR/app/package.json"
   npx --yes @electron/asar pack "$TMPDIR/app" "$TMPDIR/app-new.asar" 2>/dev/null
   sudo cp "$ELECTRON_ASAR" "${ELECTRON_ASAR}.bak"
   sudo cp "$TMPDIR/app-new.asar" "$ELECTRON_ASAR"
