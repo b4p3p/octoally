@@ -279,17 +279,164 @@ function buildSessionCommand(task: string, direct = false, sessionCmd = '', cliT
   return cmd;
 }
 
-function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude'): string {
+/* ================================================================
+   Agent .md parser — extracts portable role/expertise/capabilities
+   from .claude/agents/<name>.md so Codex (which has no native
+   --agent support) can be given a richer persona prompt than just
+   "You are a <name> agent". Claude continues to use --agent natively.
+   ================================================================
+   Convention follows the lst97 / wshobson sub-agent template:
+     **Role**: <inline>
+     **Expertise**: <inline>
+     **Key Capabilities**:
+       - bullet
+       - bullet
+     **MCP Integration**:    ← skipped (Claude-only)
+   Sections referencing mcp__* tools or "Use PROACTIVELY..." meta
+   are pruned — they're noise for Codex.
+
+   Optional frontmatter overrides for users who want fine control:
+     description_codex: <single-line description override>
+     prompt_codex:      <single-line full prompt override; supports {{task}}>
+*/
+
+interface ParsedAgent {
+  description?: string;
+  descriptionCodex?: string;
+  promptCodex?: string;
+  role?: string;
+  expertise?: string;
+  capabilities: string[];
+}
+
+function findAgentMdPath(agentType: string, projectPath: string): string | null {
+  const candidates = [
+    join(projectPath, '.claude', 'agents', `${agentType}.md`),
+    join(homedir(), '.claude', 'agents', `${agentType}.md`),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+function parseAgentMd(mdPath: string): ParsedAgent | null {
+  let content: string;
+  try { content = readFileSync(mdPath, 'utf-8'); } catch { return null; }
+
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!fmMatch) return null;
+  const [, fmBlock, body] = fmMatch;
+
+  const result: ParsedAgent = { capabilities: [] };
+
+  // Frontmatter — simple key: value (matches the existing parser in projects.ts:914)
+  for (const line of fmBlock.split('\n')) {
+    const m = line.match(/^([a-z_]+):\s*(.+)$/i);
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    const value = m[2].trim().replace(/^["']|["']$/g, '');
+    if (key === 'description') result.description = value;
+    else if (key === 'description_codex') result.descriptionCodex = value;
+    else if (key === 'prompt_codex') result.promptCodex = value;
+  }
+
+  result.role = extractInlineSection(body, 'Role');
+  result.expertise = extractInlineSection(body, 'Expertise');
+  result.capabilities = extractBulletSection(body, 'Key Capabilities');
+
+  return result;
+}
+
+/** Match `**Label**: <text>` continuing on subsequent indented lines until a blank line or new bold/heading. */
+function extractInlineSection(body: string, label: string): string | undefined {
+  const re = new RegExp(`\\*\\*${label}\\*\\*:\\s*([^\\n]+)`, 'm');
+  const m = body.match(re);
+  if (!m) return undefined;
+  const value = m[1].trim();
+  // Drop the section if it references mcp__ tools (Claude-specific noise).
+  if (value.includes('mcp__')) return undefined;
+  return value;
+}
+
+/** Match `**Label**:` followed by `- bullet` lines until next bold/heading. */
+function extractBulletSection(body: string, label: string): string[] {
+  const startRe = new RegExp(`\\*\\*${label}\\*\\*:`, 'm');
+  const startMatch = body.match(startRe);
+  if (!startMatch || startMatch.index == null) return [];
+  const after = body.slice(startMatch.index + startMatch[0].length);
+  const bullets: string[] = [];
+  let started = false;
+  for (const raw of after.split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (/^\s*-\s+/.test(line)) {
+      const text = line.replace(/^\s*-\s+/, '').trim();
+      if (text.includes('mcp__')) continue; // skip MCP-tool bullets
+      bullets.push(text);
+      started = true;
+    } else if (started && line.trim() === '') {
+      continue; // tolerate intra-list blank lines
+    } else if (started) {
+      break; // hit non-bullet content — section ended
+    }
+    // before first bullet: skip blank/intro lines
+  }
+  return bullets;
+}
+
+/** Strip the Claude-specific "Use PROACTIVELY ..." meta-instruction from a description. */
+function cleanDescriptionForCodex(desc: string): string {
+  return desc.replace(/\s*Use\s+PROACTIVELY[^.]*\.?/gi, '').trim();
+}
+
+function buildCodexAgentPrompt(agentType: string, task: string, projectPath: string): string {
+  const fallbackTask = task || 'Ask me what I want you to do and NOTHING ELSE.';
+  const fallback = task
+    ? `You are a ${agentType} agent. ${task}`
+    : `You are a ${agentType} agent. Ask me what I want you to do.`;
+
+  const mdPath = findAgentMdPath(agentType, projectPath);
+  if (!mdPath) return fallback;
+  const parsed = parseAgentMd(mdPath);
+  if (!parsed) return fallback;
+
+  // Explicit override beats convention-based extraction.
+  if (parsed.promptCodex) {
+    return parsed.promptCodex.includes('{{task}}')
+      ? parsed.promptCodex.replace(/\{\{task\}\}/g, fallbackTask)
+      : `${parsed.promptCodex}\n\nUser request: ${fallbackTask}`;
+  }
+
+  const roleLine = parsed.role
+    ?? parsed.descriptionCodex
+    ?? (parsed.description ? cleanDescriptionForCodex(parsed.description) : '');
+
+  const lines: string[] = [`You are the ${agentType} agent.`];
+  if (roleLine) lines.push('', `Role: ${roleLine}`);
+  if (parsed.expertise) lines.push('', `Expertise: ${parsed.expertise}`);
+  if (parsed.capabilities.length > 0) {
+    lines.push('', 'Key capabilities:');
+    for (const c of parsed.capabilities) lines.push(`- ${c}`);
+  }
+
+  // Nothing extracted beyond the name? Return the simple fallback to avoid an awkward header-only prompt.
+  if (lines.length === 1) return fallback;
+
+  lines.push('', '---', '', `User request: ${fallbackTask}`);
+  return lines.join('\n');
+}
+
+function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', projectPath = ''): string {
   const escapedType = agentType.replace(/'/g, "'\\''");
   const escapedTask = task.replace(/'/g, "'\\''");
 
   let cmd: string;
   if (cliType === 'codex') {
     const baseCmd = sessionCmd || 'codex';
-    // Codex CLI doesn't have --agent flag. Pass the agent role as part of the prompt.
-    const prompt = task
-      ? `You are a ${agentType} agent. ${task}`
-      : `You are a ${agentType} agent. Ask me what I want you to do.`;
+    // Codex CLI has no --agent flag. Build a richer persona prompt by
+    // extracting portable sections from the .claude/agents/<name>.md file
+    // (skipping Claude-specific MCP / "Use PROACTIVELY" content).
+    const prompt = buildCodexAgentPrompt(agentType, task, projectPath);
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     cmd = `${baseCmd} --no-alt-screen '${escapedPrompt}'`;
   } else {
@@ -419,7 +566,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
       }
     } else if (msg.mode === 'agent' && msg.agentType) {
       // agent mode — launch CLI with --agent flag
-      const command = buildAgentCommand(msg.agentType, msg.task, msg.useTmux, sessionCmd, cliType);
+      const command = buildAgentCommand(msg.agentType, msg.task, msg.useTmux, sessionCmd, cliType, msg.projectPath);
       if (msg.useTmux) {
         await tmuxCreate(msg.sessionId, msg.projectPath, msg.cols, msg.rows, command);
         const pp = setupPipePane(msg.sessionId);
