@@ -110,6 +110,10 @@ export function initDb(): void {
   try { db.exec('ALTER TABLE projects ADD COLUMN skip_permissions INTEGER DEFAULT 0'); } catch {}
   // Codex support: track which CLI (claude or codex) launched the session
   try { db.exec("ALTER TABLE sessions ADD COLUMN cli_type TEXT DEFAULT 'claude'"); } catch {}
+  // Per-project default model override (empty = inherit global)
+  try { db.exec("ALTER TABLE projects ADD COLUMN default_model TEXT DEFAULT ''"); } catch {}
+  // Per-session model (captured at spawn time for badge display and reconnect)
+  try { db.exec("ALTER TABLE sessions ADD COLUMN model TEXT"); } catch {}
   // ruflo deprecation: seed disposition setting
   try { db.exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('ruflo_disposition', 'undecided')"); } catch {}
 

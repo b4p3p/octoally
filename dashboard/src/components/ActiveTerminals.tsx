@@ -5,6 +5,7 @@ import type { Session, Project } from '../lib/api';
 import { Terminal } from './Terminal';
 import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Rows3, Zap, Bot, TerminalSquare } from 'lucide-react';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
+import { modelBadgeLabel } from './ModelPicker';
 
 interface ActiveTerminalsProps {
   onBack: () => void;
@@ -451,6 +452,15 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                   <span className="text-[10px] truncate min-w-0 ml-auto" style={{ color: 'var(--text-secondary)' }}>
                     {session.task || 'Terminal'}
                   </span>
+                  {(session as any).model && (
+                    <span
+                      className="text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0"
+                      style={{ background: 'var(--bg-primary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+                      title={`Model: ${(session as any).model}`}
+                    >
+                      {modelBadgeLabel((session as any).model)}
+                    </span>
+                  )}
                   <div
                     className="w-1.5 h-1.5 rounded-full shrink-0"
                     style={{

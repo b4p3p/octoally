@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
-import { X, Settings, Check, Loader2, Zap, Bot, Type, Globe, RotateCcw, BarChart3, Download, Trash2 } from 'lucide-react';
+import { X, Settings, Check, Loader2, Zap, Bot, Type, Globe, RotateCcw, BarChart3, Download, Trash2, Sparkles } from 'lucide-react';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
+import { ModelPicker } from './ModelPicker';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -64,6 +65,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   const [fontSize, setFontSize] = useState('13');
   const [appFontSize, setAppFontSize] = useState('16');
   const [serverPort, setServerPort] = useState('42010');
+  const [defaultModel, setDefaultModel] = useState('');
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -76,6 +78,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       setFontSize(s.terminal_font_size || '13');
       setAppFontSize(s.app_font_size || '16');
       setServerPort(s.server_port || '42010');
+      setDefaultModel(s.default_model || '');
     }
   }, [data]);
 
@@ -105,6 +108,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       terminal_font_size: fontSize,
       app_font_size: appFontSize,
       server_port: serverPort,
+      default_model: defaultModel,
     });
   }
 
@@ -340,6 +344,27 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         <span>24</span>
                       </div>
                     </div>
+                  </div>
+                </div>
+
+                {/* Default Model */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4" style={{ color: '#f59e0b' }} />
+                    <h4 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      Default Model
+                    </h4>
+                  </div>
+                  <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    Passed as <code>--model</code> to the Claude CLI when launching sessions. Projects and individual launches can override this.
+                  </p>
+                  <div className="pl-1">
+                    <ModelPicker
+                      value={defaultModel}
+                      onChange={setDefaultModel}
+                      inheritLabel="Let the CLI decide (no --model flag)"
+                      hint="Aliases (opus / sonnet / haiku) always track the newest model in their family."
+                    />
                   </div>
                 </div>
 

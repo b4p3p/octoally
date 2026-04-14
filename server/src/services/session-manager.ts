@@ -136,6 +136,7 @@ interface PendingSpawn {
   projectId?: string;
   socketPath?: string;  // for adopt mode
   cliType?: 'claude' | 'codex';
+  model?: string;        // optional per-launch model override
 }
 const pendingSpawns = new Map<string, PendingSpawn>();
 
@@ -865,7 +866,23 @@ export function createSession(_projectPath: string, task: string, projectId?: st
   return db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Session;
 }
 
-export async function spawnSession(sessionId: string, projectPath: string, task: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude'): Promise<void> {
+/**
+ * Resolve model identifier for a spawn with precedence:
+ *   explicit argument > project.default_model > settings.default_model > ''
+ * Only Claude CLI honours `--model`; for Codex we always return ''.
+ */
+function resolveModel(projectPath: string, cliType: 'claude' | 'codex', explicit?: string): string {
+  if (cliType !== 'claude') return '';
+  if (explicit && explicit.trim()) return explicit.trim();
+  try {
+    const proj = getDb().prepare('SELECT default_model FROM projects WHERE path = ?').get(projectPath) as { default_model?: string } | undefined;
+    if (proj?.default_model && proj.default_model.trim()) return proj.default_model.trim();
+  } catch { /* column may not exist on a pre-migration DB — fall through */ }
+  const globalDefault = getSetting('default_model');
+  return globalDefault ? globalDefault.trim() : '';
+}
+
+export async function spawnSession(sessionId: string, projectPath: string, task: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude', modelOverride?: string): Promise<void> {
   const preSpawnFiles = snapshotClaudeSessionFiles(projectPath);
 
   const worker = await forkWorker();
@@ -884,6 +901,11 @@ export async function spawnSession(sessionId: string, projectPath: string, task:
     sessionCommand += ' --dangerously-skip-permissions';
   }
 
+  const model = resolveModel(projectPath, cliType, modelOverride);
+  if (model) {
+    try { getDb().prepare('UPDATE sessions SET model = ? WHERE id = ?').run(model, sessionId); } catch { /* non-fatal */ }
+  }
+
   // Tell the worker to spawn the session
   worker.send({
     type: 'spawn',
@@ -897,6 +919,7 @@ export async function spawnSession(sessionId: string, projectPath: string, task:
     useDtach: config.useDtach,
     sessionCommand,
     cliType,
+    model,
   });
 
   insertEvent({
@@ -933,7 +956,7 @@ export async function spawnTerminal(sessionId: string, projectPath: string, cols
   });
 }
 
-export async function spawnAgent(sessionId: string, projectPath: string, task: string, agentType: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude'): Promise<void> {
+export async function spawnAgent(sessionId: string, projectPath: string, task: string, agentType: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude', modelOverride?: string): Promise<void> {
   const preSpawnFiles = snapshotClaudeSessionFiles(projectPath);
 
   const worker = await forkWorker();
@@ -952,6 +975,11 @@ export async function spawnAgent(sessionId: string, projectPath: string, task: s
     sessionCommand += ' --dangerously-skip-permissions';
   }
 
+  const model = resolveModel(projectPath, cliType, modelOverride);
+  if (model) {
+    try { getDb().prepare('UPDATE sessions SET model = ? WHERE id = ?').run(model, sessionId); } catch { /* non-fatal */ }
+  }
+
   worker.send({
     type: 'spawn',
     sessionId,
@@ -965,6 +993,7 @@ export async function spawnAgent(sessionId: string, projectPath: string, task: s
     useDtach: config.useDtach,
     sessionCommand,
     cliType,
+    model,
   });
 
   insertEvent({

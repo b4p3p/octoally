@@ -5,6 +5,7 @@ import { Play, Loader2, Bot, TerminalSquare, Globe, Users, X, FolderOpen, GitBra
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { AgentGuideModal } from './AgentGuide';
 import { SessionMicButton } from './SessionMicButton';
+import { ModelPicker } from './ModelPicker';
 
 interface SessionLauncherProps {
   project: Project;
@@ -155,12 +156,14 @@ function TaskModal({
   codexReady: boolean;
   initialCliType?: 'claude' | 'codex';
   onClose: () => void;
-  onLaunch: (task: string, agentType?: string, cliType?: 'claude' | 'codex') => void;
+  onLaunch: (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean) => void;
 }) {
   const [task, setTask] = useState('');
   const [agentType, setAgentType] = useState(agents[0]?.name || 'coder');
   const [cliType, setCliType] = useState<'claude' | 'codex'>(initialCliType || 'claude');
   const [sessionPrompt, setSessionPrompt] = useState<string | null>(null);
+  const [model, setModel] = useState<string>(project.default_model || '');
+  const [rememberModel, setRememberModel] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Wizard state — only used when mode === 'agent'. In session mode the
@@ -188,7 +191,8 @@ function TaskModal({
     : effectiveTask;
 
   const handleLaunch = () => {
-    onLaunch(finalTask, mode === 'agent' ? agentType : undefined, cliType);
+    const modelToSend = cliType === 'claude' ? model : '';
+    onLaunch(finalTask, mode === 'agent' ? agentType : undefined, cliType, modelToSend, rememberModel && !!modelToSend);
   };
 
   // Pick an agent and advance to the task step
@@ -541,34 +545,60 @@ function TaskModal({
                 </div>
               )}
 
-              {/* CLI type selector */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>CLI:</span>
-                <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
-                  <button
-                    onClick={() => setCliType('claude')}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
-                    style={{
-                      background: cliType === 'claude' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
-                      color: cliType === 'claude' ? 'var(--accent)' : 'var(--text-secondary)',
-                      borderRight: '1px solid var(--border)',
-                    }}
-                  >
-                    <ClaudeIcon className="w-3.5 h-3.5" />
-                    Claude
-                  </button>
-                  <button
-                    onClick={() => setCliType('codex')}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
-                    style={{
-                      background: cliType === 'codex' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
-                      color: cliType === 'codex' ? 'var(--accent)' : 'var(--text-secondary)',
-                    }}
-                  >
-                    <CodexIcon className="w-3.5 h-3.5" />
-                    Codex
-                  </button>
+              {/* CLI type + model selectors */}
+              <div className="flex flex-wrap items-end gap-4">
+                <div>
+                  <span className="block mb-1.5 text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>CLI</span>
+                  <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
+                    <button
+                      onClick={() => setCliType('claude')}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors"
+                      style={{
+                        background: cliType === 'claude' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
+                        color: cliType === 'claude' ? 'var(--accent)' : 'var(--text-secondary)',
+                        borderRight: '1px solid var(--border)',
+                      }}
+                    >
+                      <ClaudeIcon className="w-3.5 h-3.5" />
+                      Claude
+                    </button>
+                    <button
+                      onClick={() => setCliType('codex')}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors"
+                      style={{
+                        background: cliType === 'codex' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
+                        color: cliType === 'codex' ? 'var(--accent)' : 'var(--text-secondary)',
+                      }}
+                    >
+                      <CodexIcon className="w-3.5 h-3.5" />
+                      Codex
+                    </button>
+                  </div>
                 </div>
+
+                {cliType === 'claude' && (
+                  <div className="flex-1 min-w-[240px]">
+                    <ModelPicker
+                      label="Model"
+                      value={model}
+                      onChange={setModel}
+                      inheritLabel={project.default_model ? `Project default (${project.default_model})` : 'Use default (global or CLI)'}
+                    />
+                    {model && project.id && (
+                      <label className="flex items-center gap-1.5 mt-1.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={rememberModel}
+                          onChange={(e) => setRememberModel(e.target.checked)}
+                          className="w-3 h-3 rounded accent-orange-500"
+                        />
+                        <span className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                          Remember as project default
+                        </span>
+                      </label>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Info box — only for session mode, since the agent step is now self-explanatory via the wizard */}
@@ -709,7 +739,7 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
   const agents = agentsData?.agents ?? [];
 
   const createMutation = useMutation({
-    mutationFn: (opts: { task: string; mode: 'session' | 'agent'; agentType?: string; cliType?: 'claude' | 'codex' }) => {
+    mutationFn: (opts: { task: string; mode: 'session' | 'agent'; agentType?: string; cliType?: 'claude' | 'codex'; model?: string; rememberModel?: boolean }) => {
       return api.sessions.create({
         project_path: project.path,
         task: opts.task,
@@ -717,10 +747,13 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
         agent_type: opts.agentType,
         project_id: project.id,
         cli_type: opts.cliType,
+        model: opts.model || undefined,
+        remember_model: opts.rememberModel || undefined,
       });
     },
-    onSuccess: (data) => {
+    onSuccess: (data, vars) => {
       queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      if (vars.rememberModel) queryClient.invalidateQueries({ queryKey: ['projects'] });
       setLaunchMode(null);
       if (data.session?.id) {
         onSessionCreated(data.session.id, undefined, 'session');
@@ -740,9 +773,9 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
     },
   });
 
-  const handleLaunch = (task: string, agentType?: string, cliType?: 'claude' | 'codex') => {
+  const handleLaunch = (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean) => {
     const mode = agentType ? 'agent' : 'session';
-    createMutation.mutate({ task, mode, agentType, cliType });
+    createMutation.mutate({ task, mode, agentType, cliType, model, rememberModel });
   };
 
   const ocPrompt = (project.openclaw_prompt ?? '').trim();

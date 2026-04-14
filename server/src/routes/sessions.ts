@@ -63,10 +63,19 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
       mode?: 'session' | 'terminal' | 'agent';
       agent_type?: string;
       cli_type?: 'claude' | 'codex';
+      model?: string;
+      remember_model?: boolean;
     };
   }>('/sessions', async (req, reply) => {
-    const { project_path, task, project_id, mode, agent_type, cli_type } = req.body as any;
+    const { project_path, task, project_id, mode, agent_type, cli_type, model, remember_model } = req.body as any;
     const cliType = cli_type === 'codex' ? 'codex' : 'claude';
+    const modelTrim = typeof model === 'string' ? model.trim() : '';
+
+    if (remember_model && modelTrim && project_id) {
+      try {
+        getDb().prepare("UPDATE projects SET default_model = ?, updated_at = datetime('now') WHERE id = ?").run(modelTrim, project_id);
+      } catch { /* non-fatal — column may be missing on an un-migrated DB */ }
+    }
 
     if (mode === 'terminal') {
       if (!project_path) {
@@ -86,12 +95,12 @@ export const sessionRoutes: FastifyPluginAsync = async (app) => {
         return reply.status(400).send({ error: 'agent_type is required for agent mode' });
       }
       const session = sessionManager.createSession(project_path, `Agent (${agent_type}): ${task}`, project_id, cliType);
-      registerPendingSpawn(session.id, { projectPath: project_path, task, mode: 'agent', agentType: agent_type, projectId: project_id, cliType });
+      registerPendingSpawn(session.id, { projectPath: project_path, task, mode: 'agent', agentType: agent_type, projectId: project_id, cliType, model: modelTrim || undefined });
       return { ok: true, session };
     }
 
     const session = sessionManager.createSession(project_path, task, project_id, cliType);
-    registerPendingSpawn(session.id, { projectPath: project_path, task, mode: 'session', projectId: project_id, cliType });
+    registerPendingSpawn(session.id, { projectPath: project_path, task, mode: 'session', projectId: project_id, cliType, model: modelTrim || undefined });
 
     return { ok: true, session };
   });

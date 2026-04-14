@@ -49,6 +49,7 @@ interface SpawnMessage {
   agentType?: string;
   sessionCommand?: string;
   cliType?: 'claude' | 'codex';
+  model?: string; // resolved model identifier — appended as --model flag
   cols: number;
   rows: number;
   useTmux: boolean;
@@ -258,7 +259,15 @@ function cleanupPipePane(sessionId: string, fifoPath?: string): void {
    session command builder
    ================================================================ */
 
-function buildSessionCommand(task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude'): string {
+/** Shell-quote a model identifier so brackets / exotic chars in e.g. `opus[1m]`
+ *  survive the outer sh -c / tmux quoting layers unmangled. */
+function modelFlag(model: string | undefined, cliType: 'claude' | 'codex'): string {
+  if (!model || cliType !== 'claude') return '';
+  const escaped = model.replace(/'/g, "'\\''");
+  return ` --model '${escaped}'`;
+}
+
+function buildSessionCommand(task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', model = ''): string {
   const escaped = task.replace(/'/g, "'\\''");
   if (cliType === 'codex') {
     // --no-alt-screen prevents Codex from using the alternate screen buffer,
@@ -272,7 +281,7 @@ function buildSessionCommand(task: string, direct = false, sessionCmd = '', cliT
   }
   // Claude: launch with configured command (may include flags like --dangerously-skip-permissions)
   const baseCmd = sessionCmd || 'claude';
-  const cmd = `${baseCmd} '${escaped}'`;
+  const cmd = `${baseCmd}${modelFlag(model, cliType)} '${escaped}'`;
   if (direct) {
     return `command ${cmd}`;
   }
@@ -426,7 +435,7 @@ function buildCodexAgentPrompt(agentType: string, task: string, projectPath: str
   return lines.join('\n');
 }
 
-function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', projectPath = ''): string {
+function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', projectPath = '', model = ''): string {
   const escapedType = agentType.replace(/'/g, "'\\''");
   const escapedTask = task.replace(/'/g, "'\\''");
 
@@ -441,10 +450,11 @@ function buildAgentCommand(agentType: string, task: string, direct = false, sess
     cmd = `${baseCmd} --no-alt-screen '${escapedPrompt}'`;
   } else {
     const baseCmd = sessionCmd || 'claude';
+    const mf = modelFlag(model, cliType);
     // Claude CLI uses --agent to load agent definitions from .claude/agents/
     cmd = task
-      ? `${baseCmd} --agent '${escapedType}' '${escapedTask}'`
-      : `${baseCmd} --agent '${escapedType}'`;
+      ? `${baseCmd}${mf} --agent '${escapedType}' '${escapedTask}'`
+      : `${baseCmd}${mf} --agent '${escapedType}'`;
   }
 
   if (direct) {
@@ -536,6 +546,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
   const shell = process.env.SHELL || '/bin/bash';
   const sessionCmd = msg.sessionCommand || 'claude';
   const cliType = msg.cliType || 'claude';
+  const model = msg.model || '';
 
   try {
     if (msg.mode === 'terminal') {
@@ -566,7 +577,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
       }
     } else if (msg.mode === 'agent' && msg.agentType) {
       // agent mode — launch CLI with --agent flag
-      const command = buildAgentCommand(msg.agentType, msg.task, msg.useTmux, sessionCmd, cliType, msg.projectPath);
+      const command = buildAgentCommand(msg.agentType, msg.task, msg.useTmux, sessionCmd, cliType, msg.projectPath, model);
       if (msg.useTmux) {
         await tmuxCreate(msg.sessionId, msg.projectPath, msg.cols, msg.rows, command);
         const pp = setupPipePane(msg.sessionId);
@@ -595,7 +606,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
     } else {
       // session mode
       if (msg.useTmux) {
-        const command = buildSessionCommand(msg.task, true, sessionCmd, cliType);
+        const command = buildSessionCommand(msg.task, true, sessionCmd, cliType, model);
         await tmuxCreate(msg.sessionId, msg.projectPath, msg.cols, msg.rows, command);
         const pp = setupPipePane(msg.sessionId);
         if (pp) {
@@ -608,7 +619,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
           env: sessionEnv(),
         });
       } else if (msg.useDtach) {
-        const command = buildSessionCommand(msg.task, false, sessionCmd, cliType);
+        const command = buildSessionCommand(msg.task, false, sessionCmd, cliType, model);
         await dtachCreate(msg.sessionId, msg.projectPath, command);
         await new Promise(r => setTimeout(r, 100));
         ptyProcess = pty.spawn(shell, ['-c', `dtach -a ${dtachSocket(msg.sessionId)} -Ez`], {
@@ -616,7 +627,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
           env: sessionEnv(),
         });
       } else {
-        const command = buildSessionCommand(msg.task, false, sessionCmd, cliType);
+        const command = buildSessionCommand(msg.task, false, sessionCmd, cliType, model);
         ptyProcess = pty.spawn(shell, ['-i', '-c', command], {
           name: 'xterm-256color', cols: msg.cols, rows: msg.rows, cwd: msg.projectPath,
           env: sessionEnv(),

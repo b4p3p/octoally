@@ -591,6 +591,7 @@ export interface Project {
   openclaw_prompt: string | null;
   default_web_url: string | null;
   skip_permissions: number;
+  default_model: string;
   color: string;
   created_at: string;
   updated_at: string;
@@ -688,7 +689,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
   // Update project
   app.patch<{
     Params: { id: string };
-    Body: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number; color?: string };
+    Body: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number; default_model?: string | null; color?: string };
   }>('/projects/:id', async (req, reply) => {
     const db = getDb();
     const updates: string[] = [];
@@ -700,6 +701,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     if (req.body.openclaw_prompt !== undefined) { updates.push('openclaw_prompt = ?'); params.push(req.body.openclaw_prompt); }
     if (req.body.default_web_url !== undefined) { updates.push('default_web_url = ?'); params.push(req.body.default_web_url); }
     if (req.body.skip_permissions !== undefined) { updates.push('skip_permissions = ?'); params.push(req.body.skip_permissions ? 1 : 0); }
+    if (req.body.default_model !== undefined) { updates.push('default_model = ?'); params.push(req.body.default_model || ''); }
     if (req.body.color !== undefined) { updates.push('color = ?'); params.push(req.body.color); }
 
     if (updates.length === 0) return reply.status(400).send({ error: 'Nothing to update' });

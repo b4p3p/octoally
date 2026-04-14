@@ -18,6 +18,7 @@ const DEFAULTS: Record<string, string> = {
   server_port: '42010',
   ruflo_disposition: 'undecided',   // undecided | keep | remove_all | removed
   statusline_prompted: 'false',    // whether we've asked the user about statusline install
+  default_model: '',               // '' = let the CLI use its own default (no --model flag)
 };
 
 export function getSetting(key: string): string {

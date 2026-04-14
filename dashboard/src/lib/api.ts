@@ -20,7 +20,7 @@ export const api = {
     list: (status?: string) =>
       fetchJSON<{ sessions: Session[] }>(`/sessions${status ? `?status=${status}` : ''}`),
     get: (id: string) => fetchJSON<{ session: Session }>(`/sessions/${id}`),
-    create: (data: { project_path: string; task?: string; mode?: 'session' | 'terminal' | 'agent'; agent_type?: string; project_id?: string; cli_type?: 'claude' | 'codex' }) =>
+    create: (data: { project_path: string; task?: string; mode?: 'session' | 'terminal' | 'agent'; agent_type?: string; project_id?: string; cli_type?: 'claude' | 'codex'; model?: string; remember_model?: boolean }) =>
       fetchJSON<{ ok: boolean; session: Session }>('/sessions', {
         method: 'POST',
         body: JSON.stringify(data),
@@ -83,7 +83,7 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    update: (id: string, data: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number; color?: string }) =>
+    update: (id: string, data: { name?: string; description?: string; session_prompt?: string | null; openclaw_prompt?: string | null; default_web_url?: string | null; skip_permissions?: number; default_model?: string | null; color?: string }) =>
       fetchJSON<{ ok: boolean; project: Project }>(`/projects/${id}`, {
         method: 'PATCH',
         body: JSON.stringify(data),
@@ -239,6 +239,9 @@ export const api = {
       uninstall: () => fetchJSON<{ ok: boolean; removed: string[] }>('/settings/statusline/uninstall', { method: 'POST' }),
     },
   },
+  models: {
+    list: (refresh?: boolean) => fetchJSON<{ models: ModelEntry[] }>(`/models${refresh ? '?refresh=1' : ''}`),
+  },
   health: () => fetchJSON<{ name: string; version: string; status: string; uptime?: number; reconnecting?: boolean; reconnectTotal?: number; reconnectDone?: number }>('/health'),
   openFolder: (path: string) =>
     fetchJSON<{ ok: boolean }>('/open-folder', { method: 'POST', body: JSON.stringify({ path }) }),
@@ -260,6 +263,14 @@ export interface Session {
   exit_code: number | null;
   created_at: string;
   cli_type?: 'claude' | 'codex';
+  model?: string | null;
+}
+
+export interface ModelEntry {
+  id: string;
+  kind: 'alias' | 'discovered';
+  family?: 'opus' | 'sonnet' | 'haiku';
+  has1m?: boolean;
 }
 
 export interface Event {
@@ -280,6 +291,7 @@ export interface Project {
   openclaw_prompt: string | null;
   default_web_url: string | null;
   skip_permissions: number;
+  default_model: string;
   color: string;
   created_at: string;
 }

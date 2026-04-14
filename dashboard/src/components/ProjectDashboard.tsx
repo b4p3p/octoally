@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, type Project } from '../lib/api';
+import { ModelPicker } from './ModelPicker';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
@@ -141,6 +142,7 @@ function ProjectForm({
   const [description, setDescription] = useState(project?.description || '');
   const [projectColor, setProjectColor] = useState(project?.color || '');
   const [defaultWebUrl, setDefaultWebUrl] = useState(project?.default_web_url || '');
+  const [defaultModel, setDefaultModel] = useState(project?.default_model || '');
   const [sessionPrompt, setSessionPrompt] = useState(project?.session_prompt || '');
   const [openclawPrompt, setOpenclawPrompt] = useState(project?.openclaw_prompt || '');
   const [claudeMd, setClaudeMd] = useState('');
@@ -237,6 +239,7 @@ function ProjectForm({
       if (name !== project!.name) fields.name = name;
       if (description !== (project!.description || '')) fields.description = description;
       if (defaultWebUrl !== (project!.default_web_url || '')) fields.default_web_url = defaultWebUrl || null;
+      if (defaultModel !== (project!.default_model || '')) fields.default_model = defaultModel || null;
       if (sessionPrompt !== (project!.session_prompt || ''))
         fields.session_prompt = sessionPrompt || null;
       if (openclawPrompt !== (project!.openclaw_prompt || ''))
@@ -438,16 +441,27 @@ function ProjectForm({
               </div>
             </div>
 
-            {/* Default Web URL */}
-            <div>
-              <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>Default Web Page URL</label>
-              <input
-                value={defaultWebUrl}
-                onChange={(e) => setDefaultWebUrl(e.target.value)}
-                placeholder="http://localhost:3000 (default for Vite projects)"
-                className={inputClass}
-                style={inputStyle}
-              />
+            {/* Default Web URL + Default Model side by side */}
+            <div className="grid grid-cols-2 gap-x-6">
+              <div>
+                <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>Default Web Page URL</label>
+                <input
+                  value={defaultWebUrl}
+                  onChange={(e) => setDefaultWebUrl(e.target.value)}
+                  placeholder="http://localhost:3000 (default for Vite projects)"
+                  className={inputClass}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <ModelPicker
+                  label="Default Claude Model"
+                  value={defaultModel}
+                  onChange={setDefaultModel}
+                  inheritLabel="Use global default"
+                  hint="Overrides the global default when launching Claude sessions for this project."
+                />
+              </div>
             </div>
 
             {/* GitHub Repository */}

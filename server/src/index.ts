@@ -24,6 +24,7 @@ import { fileRoutes } from './routes/files.js';
 import { gitRoutes } from './routes/git.js';
 import { agentRoutes } from './routes/agent.js';
 import { settingsRoutes } from './routes/settings.js';
+import { modelRoutes } from './routes/models.js';
 import { appRouter } from './trpc/router.js';
 import {
   fastifyTRPCPlugin,
@@ -117,6 +118,7 @@ async function start() {
   await app.register(gitRoutes, { prefix: '/api' });
   await app.register(agentRoutes, { prefix: '/api' });
   await app.register(settingsRoutes, { prefix: '/api' });
+  await app.register(modelRoutes, { prefix: '/api' });
 
   // tRPC
   await app.register(fastifyTRPCPlugin, {

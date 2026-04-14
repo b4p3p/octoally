@@ -58,9 +58,9 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
               } else if (info.mode === 'terminal') {
                 await spawnTerminal(sessionId, info.projectPath, msg.cols, msg.rows);
               } else if (info.mode === 'agent' && info.agentType) {
-                await spawnAgent(sessionId, info.projectPath, info.task, info.agentType, msg.cols, msg.rows, info.cliType);
+                await spawnAgent(sessionId, info.projectPath, info.task, info.agentType, msg.cols, msg.rows, info.cliType, info.model);
               } else {
-                await spawnSession(sessionId, info.projectPath, info.task, msg.cols, msg.rows, info.cliType);
+                await spawnSession(sessionId, info.projectPath, info.task, msg.cols, msg.rows, info.cliType, info.model);
               }
               const attached = attachTerminal(sessionId, socket);
               if (!attached) {
