@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, type Project, type RufloAgent } from '../lib/api';
-import { Play, Loader2, Bot, TerminalSquare, Globe, Users, X, FolderOpen, GitBranch, Cpu, Activity, FileText, Zap, Code, ClipboardList, Search, FlaskConical, GitPullRequest, Compass, ArrowLeft, Star } from 'lucide-react';
+import { Play, Loader2, Bot, TerminalSquare, Globe, Users, X, FolderOpen, GitBranch, Cpu, Activity, FileText, Zap, Code, ClipboardList, Search, FlaskConical, Rocket, BookOpen, UserCog, Compass, ArrowLeft, Star } from 'lucide-react';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { AgentGuideModal } from './AgentGuide';
 import { SessionMicButton } from './SessionMicButton';
@@ -17,29 +17,46 @@ type LaunchMode = 'session' | 'agent' | null;
 /* ================================================================
    Agent picker wizard — intent → agent → task
    ================================================================
-   Curated mapping from "what does the user want to do" to a small
-   set of recommended agents, instead of dumping all 90 agents into
-   a single dropdown. Power users can still browse all via the
-   "Browse all" escape hatch.
+   Curated mapping from "what does the user want to do" to the
+   OctoAlly default agents (see server/src/data/agents/), plus a
+   "Custom / my agents" card that auto-surfaces any installed
+   agent whose name is outside the default set. Power users can
+   still browse all via the "Browse all" escape hatch.
 
-   Each intent lists agents BY NAME. The actual descriptions come
-   from the backend (api.projects.rufloAgents) so we stay in sync
-   with whatever ruflo ships — no manual paraphrases to maintain.
-
-   Agents named here that aren't installed in a given project are
-   silently filtered out at render time.
+   Descriptions come from the backend (api.projects.rufloAgents)
+   so they stay in sync with the installed .md frontmatter — no
+   manual paraphrases to maintain. Names listed here that aren't
+   installed in a given project are filtered out at render time.
 */
 
-type IntentKey = 'write-code' | 'plan-estimate' | 'review-audit' | 'test-validate' | 'github-workflow';
+// Names shipped in server/src/data/agents/ — kept in sync by hand,
+// changes here should match additions/removals in that directory.
+const DEFAULT_AGENT_NAMES = new Set<string>([
+  'ai-engineer', 'api-documenter', 'architect-reviewer', 'backend-architect',
+  'cloud-architect', 'code-reviewer-pro', 'database-optimizer', 'data-engineer',
+  'data-scientist', 'debugger', 'deployment-engineer', 'devops-incident-responder',
+  'documentation-expert', 'dx-optimizer', 'electron-pro', 'frontend-developer',
+  'full-stack-developer', 'golang-pro', 'graphql-architect', 'incident-responder',
+  'legacy-modernizer', 'ml-engineer', 'mobile-developer', 'nextjs-pro',
+  'performance-engineer', 'postgresql-pglite-pro', 'product-manager', 'prompt-engineer',
+  'python-pro', 'qa-expert', 'react-pro', 'security-auditor',
+  'test-automator', 'typescript-pro', 'ui-designer', 'ux-designer',
+]);
 
 interface IntentDef {
-  key: IntentKey;
+  key: string;
   label: string;
   tagline: string;
   icon: typeof Bot;
   color: string;
-  recommended: string[];
-  domainSpecific: string[];
+  // Curated: explicit agent names, resolved against the installed set.
+  recommended?: string[];
+  domainSpecific?: string[];
+  // Dynamic: custom resolver for intents whose membership can't be listed
+  // up front (e.g. "Custom" surfaces anything not in DEFAULT_AGENT_NAMES).
+  dynamic?: (agents: RufloAgent[]) => RufloAgent[];
+  // Section label shown above the agent list when dynamic is used.
+  dynamicLabel?: string;
 }
 
 const INTENTS: IntentDef[] = [
@@ -49,8 +66,12 @@ const INTENTS: IntentDef[] = [
     tagline: 'Build a feature, fix a bug, refactor',
     icon: Code,
     color: '#60a5fa',
-    recommended: ['coder', 'sparc-coder'],
-    domainSpecific: ['backend-dev', 'mobile-dev', 'ml-developer', 'api-docs'],
+    recommended: ['full-stack-developer', 'frontend-developer', 'backend-architect'],
+    domainSpecific: [
+      'python-pro', 'typescript-pro', 'golang-pro', 'react-pro', 'nextjs-pro',
+      'mobile-developer', 'electron-pro', 'graphql-architect',
+      'ai-engineer', 'ml-engineer', 'data-engineer',
+    ],
   },
   {
     key: 'plan-estimate',
@@ -58,8 +79,8 @@ const INTENTS: IntentDef[] = [
     tagline: 'Quote a project, break it down, assess risk',
     icon: ClipboardList,
     color: '#a78bfa',
-    recommended: ['planner', 'researcher'],
-    domainSpecific: ['goal-planner', 'system-architect'],
+    recommended: ['product-manager', 'architect-reviewer'],
+    domainSpecific: ['cloud-architect', 'prompt-engineer'],
   },
   {
     key: 'review-audit',
@@ -67,8 +88,8 @@ const INTENTS: IntentDef[] = [
     tagline: 'Code review, quality, security',
     icon: Search,
     color: '#f59e0b',
-    recommended: ['code-analyzer'],
-    domainSpecific: ['sona-learning-optimizer'],
+    recommended: ['code-reviewer-pro', 'security-auditor'],
+    domainSpecific: ['architect-reviewer', 'performance-engineer', 'database-optimizer'],
   },
   {
     key: 'test-validate',
@@ -76,17 +97,38 @@ const INTENTS: IntentDef[] = [
     tagline: 'Write tests, TDD, validate',
     icon: FlaskConical,
     color: '#34d399',
-    recommended: ['tdd-london-swarm', 'production-validator'],
-    domainSpecific: ['test-long-runner'],
+    recommended: ['test-automator', 'qa-expert'],
+    domainSpecific: ['debugger'],
   },
   {
-    key: 'github-workflow',
-    label: 'GitHub workflow',
-    tagline: 'PRs, issues, releases',
-    icon: GitPullRequest,
+    key: 'ship-deploy',
+    label: 'Ship / deploy',
+    tagline: 'Release, CI/CD, incident response',
+    icon: Rocket,
     color: '#ec4899',
-    recommended: ['pr-manager', 'code-review-swarm', 'issue-tracker'],
-    domainSpecific: ['release-manager', 'cicd-engineer', 'github-modes'],
+    recommended: ['deployment-engineer', 'devops-incident-responder'],
+    domainSpecific: ['dx-optimizer', 'incident-responder', 'cloud-architect'],
+  },
+  {
+    key: 'docs-design',
+    label: 'Docs / design / data',
+    tagline: 'Documentation, UX, data & DB',
+    icon: BookOpen,
+    color: '#22d3ee',
+    recommended: ['documentation-expert', 'ux-designer'],
+    domainSpecific: [
+      'ui-designer', 'api-documenter', 'data-scientist',
+      'postgresql-pglite-pro', 'legacy-modernizer',
+    ],
+  },
+  {
+    key: 'custom',
+    label: 'Custom / my agents',
+    tagline: 'Agents you added outside the default set',
+    icon: UserCog,
+    color: '#94a3b8',
+    dynamic: (agents) => agents.filter((a) => !DEFAULT_AGENT_NAMES.has(a.name)),
+    dynamicLabel: 'Your agents',
   },
 ];
 
@@ -154,6 +196,12 @@ function TaskModal({
   const resolveAgents = (names: string[]): RufloAgent[] =>
     names.map((n) => agentByName.get(n)).filter((a): a is RufloAgent => Boolean(a));
 
+  // Count agents available in an intent — curated or dynamic.
+  const countIntentAgents = (intent: IntentDef): number => {
+    if (intent.dynamic) return intent.dynamic(agents).length;
+    return resolveAgents([...(intent.recommended ?? []), ...(intent.domainSpecific ?? [])]).length;
+  };
+
   // For "Browse all" — flat list filtered by search query, grouped by backend category
   const browseFiltered = browseQuery.trim()
     ? agents.filter((a) => {
@@ -215,7 +263,7 @@ function TaskModal({
               </div>
               <div className="grid grid-cols-2 gap-3">
                 {INTENTS.map((intent) => {
-                  const count = resolveAgents([...intent.recommended, ...intent.domainSpecific]).length;
+                  const count = countIntentAgents(intent);
                   const Icon = intent.icon;
                   return (
                     <button
@@ -284,9 +332,43 @@ function TaskModal({
                 </div>
               </div>
 
-              {/* Recommended */}
-              {(() => {
-                const recs = resolveAgents(selectedIntent.recommended);
+              {/* Dynamic intent (e.g. Custom) — single flat list */}
+              {selectedIntent.dynamic && (() => {
+                const list = selectedIntent.dynamic(agents);
+                if (list.length === 0) return (
+                  <p className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                    No agents match this category yet. Drop your .md files into <code>~/.claude/agents/</code> or <code>&lt;project&gt;/.claude/agents/</code>.
+                  </p>
+                );
+                return (
+                  <div>
+                    <span className="text-[11px] font-bold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
+                      {selectedIntent.dynamicLabel ?? 'Agents'}
+                    </span>
+                    <div className="space-y-2 mt-2">
+                      {list.map((a) => (
+                        <button
+                          key={a.name}
+                          onClick={() => pickAgent(a.name)}
+                          className="w-full text-left rounded-lg border p-3 transition-colors hover:bg-white/5"
+                          style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                        >
+                          <div className="text-sm font-semibold mb-0.5" style={{ color: 'var(--text-primary)' }}>
+                            {a.name}
+                          </div>
+                          <div className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+                            {a.description}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Recommended (curated intents) */}
+              {!selectedIntent.dynamic && (() => {
+                const recs = resolveAgents(selectedIntent.recommended ?? []);
                 if (recs.length === 0) return null;
                 return (
                   <div>
@@ -317,9 +399,9 @@ function TaskModal({
                 );
               })()}
 
-              {/* Domain-specific */}
-              {(() => {
-                const domains = resolveAgents(selectedIntent.domainSpecific);
+              {/* Domain-specific (curated intents) */}
+              {!selectedIntent.dynamic && (() => {
+                const domains = resolveAgents(selectedIntent.domainSpecific ?? []);
                 if (domains.length === 0) return null;
                 return (
                   <div>
