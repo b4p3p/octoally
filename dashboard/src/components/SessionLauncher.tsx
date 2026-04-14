@@ -545,14 +545,14 @@ function TaskModal({
                 </div>
               )}
 
-              {/* CLI type + model selectors */}
-              <div className="flex flex-wrap items-end gap-4">
-                <div>
-                  <span className="block mb-1.5 text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>CLI</span>
+              {/* CLI type + (when Claude) model selector nested under it */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>CLI:</span>
                   <div className="flex rounded-lg overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
                     <button
                       onClick={() => setCliType('claude')}
-                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
                       style={{
                         background: cliType === 'claude' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
                         color: cliType === 'claude' ? 'var(--accent)' : 'var(--text-secondary)',
@@ -564,7 +564,7 @@ function TaskModal({
                     </button>
                     <button
                       onClick={() => setCliType('codex')}
-                      className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors"
                       style={{
                         background: cliType === 'codex' ? 'var(--accent-bg, rgba(59,130,246,0.15))' : 'var(--bg-primary)',
                         color: cliType === 'codex' ? 'var(--accent)' : 'var(--text-secondary)',
@@ -577,7 +577,10 @@ function TaskModal({
                 </div>
 
                 {cliType === 'claude' && (
-                  <div className="flex-1 min-w-[240px]">
+                  <div
+                    className="ml-2 pl-3 pt-1 pb-0.5"
+                    style={{ borderLeft: '2px solid var(--border)' }}
+                  >
                     <ModelPicker
                       label="Model"
                       value={model}
