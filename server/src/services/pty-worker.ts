@@ -19,10 +19,13 @@ import type { ReadStream } from 'fs';
 
 const execFileAsync = promisify(execFile);
 
-/** Build a clean env for user-facing sessions: strip NODE_ENV so the server's
- *  production mode doesn't leak into user terminals / Claude Code / dev servers. */
+/** Build a clean env for user-facing sessions: strip server-specific vars so
+ *  they don't leak into user terminals / Claude Code / dev servers.
+ *  - NODE_ENV: prevents server's production mode from contaminating user shells
+ *  - PORT / OCTOALLY_*_PORT: prevents sandbox port assignments from overriding
+ *    child project .env files (dotenv won't override existing env vars) */
 function sessionEnv(): Record<string, string> {
-  const { NODE_ENV, ...rest } = process.env;
+  const { NODE_ENV, PORT, OCTOALLY_API_PORT, OCTOALLY_DASH_PORT, ...rest } = process.env;
   return {
     ...rest,
     TERM: 'xterm-256color',
@@ -126,10 +129,11 @@ async function tmuxCreate(
   }
 
   const shell = process.env.SHELL || '/bin/bash';
-  // Wrap the shell invocation with env -u NODE_ENV to strip it before the shell starts,
-  // since tmux new-session -d inherits from the tmux server's env, not the client's.
+  // Wrap the shell invocation with env -u to strip server-specific vars before
+  // the shell starts — tmux new-session -d inherits from the tmux server's env,
+  // not the client's, so the env option on execFileAsync alone isn't enough.
   const envCmd = 'env';
-  const envArgs = ['-u', 'NODE_ENV'];
+  const envArgs = ['-u', 'NODE_ENV', '-u', 'PORT', '-u', 'OCTOALLY_API_PORT', '-u', 'OCTOALLY_DASH_PORT'];
   const runArgs = command
     ? [envCmd, ...envArgs, shell, '-i', '-c', command]
     : [envCmd, ...envArgs, shell, '-i'];
@@ -143,10 +147,10 @@ async function tmuxCreate(
     env: sessionEnv(),
   });
 
-  try {
-    // Also strip NODE_ENV from the tmux server's global env for any future windows/panes
-    await execFileAsync('tmux', [...tmuxBaseArgs, 'set-environment', '-g', '-u', 'NODE_ENV']);
-  } catch { /* best effort */ }
+  // Strip server-specific vars from tmux global env for any future windows/panes
+  for (const varName of ['NODE_ENV', 'PORT', 'OCTOALLY_API_PORT', 'OCTOALLY_DASH_PORT']) {
+    await execFileAsync('tmux', [...tmuxBaseArgs, 'set-environment', '-g', '-u', varName]).catch(() => {});
+  }
 
   try {
     await execFileAsync('tmux', [...tmuxBaseArgs, 'set-option', '-s', 'terminal-overrides', 'xterm-256color:smcup@:rmcup@']);
