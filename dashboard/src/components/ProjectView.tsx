@@ -124,6 +124,14 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
     [sessionsData, projectId]
   );
 
+  // Set of all session IDs the server knows about (any status) — used to gate Terminal
+  // mounting so stale localStorage tabs don't fire WebSocket connects to failed sessions.
+  const allServerIds = useMemo(
+    () => new Set((sessionsData?.sessions || []).map((s: any) => s.id)),
+    [sessionsData]
+  );
+  const sessionsLoaded = sessionsData !== undefined;
+
   // Lookup map for session metadata (cli_type, task, etc.) — used in tab rendering
   const sessionLookup = useMemo(
     () => new Map(projectSessions.map((s) => [s.id, s])),
@@ -231,11 +239,12 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   // Sync terminal instances with server sessions (auto-detect running sessions)
   const syncedRef = useRef(false);
   useEffect(() => {
-    if (projectSessions.length === 0 && syncedRef.current) return;
-    if (projectSessions.length === 0 && !syncedRef.current) {
-      syncedRef.current = true;
-      return;
-    }
+    // Wait until the server has responded at least once before pruning —
+    // otherwise we'd strip tabs we just created locally that aren't yet in the
+    // sessions list. Once loaded, always run the sync so stale localStorage
+    // tabs (sessions failed/completed in a previous run) get pruned even when
+    // the project currently has zero alive sessions.
+    if (!sessionsLoaded) return;
     syncedRef.current = true;
 
     // Prune closed IDs that are no longer alive on the server (kill completed)
@@ -308,7 +317,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
 
       return result;
     });
-  }, [projectSessions]);
+  }, [projectSessions, sessionsLoaded]);
 
   // If terminals appeared and launcher was showing, switch to terminal
   // (but not if the user explicitly navigated to the Home/launcher tab)
@@ -1440,6 +1449,14 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                     if (termVisible || gridMode) mountedTerminals.current.add(term.id);
                     const shouldMount = gridMode || mountedTerminals.current.has(term.id);
 
+                    // Gate Terminal render: avoid firing a WebSocket to a session the
+                    // server has already declared dead (e.g. stale tab restored from
+                    // localStorage after a restart). Allow render when (a) we don't yet
+                    // know what the server thinks, or (b) the session is alive, or (c)
+                    // the server has never heard of this id (just-created local tab).
+                    const serverKnowsButDead = sessionsLoaded && allServerIds.has(term.id) && !sessionLookup.has(term.id);
+                    const canMount = !serverKnowsButDead;
+
                     return (
                       <div
                         key={term.id}
@@ -1562,7 +1579,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                           )}
                         </div>
                         <div className={gridMode ? "flex-1 min-h-0" : "h-full"}>
-                          {shouldMount && (
+                          {shouldMount && canMount && (
                             <Terminal
                               sessionId={term.id}
                               visible={termVisible}
