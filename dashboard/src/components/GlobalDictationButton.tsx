@@ -7,6 +7,7 @@ import {
   onTranscription,
   offTranscription,
 } from '../lib/speech';
+import { useShortcut } from '../lib/shortcuts';
 
 /**
  * Top-bar dictation button. Pure dictation — inserts transcribed text at the
@@ -157,6 +158,9 @@ export function GlobalDictationButton() {
     setGlobalDictationActive(true);
     await toggleMic('push-to-talk');
   };
+
+  // Keyboard shortcut — same toggle as clicking the button
+  useShortcut('dictation.toggle', () => { void handleClick(); });
 
   return (
     <button

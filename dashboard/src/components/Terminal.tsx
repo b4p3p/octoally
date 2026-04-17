@@ -6,6 +6,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { RotateCcw, ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
 import { useSpeechStore } from '../lib/speech';
+import { isKeyboardNavActive } from '../lib/shortcuts';
 import { api } from '../lib/api';
 import { HistoryViewer } from './HistoryViewer';
 import '@xterm/xterm/css/xterm.css';
@@ -572,10 +573,13 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
 
   // Re-focus and refit terminal when it becomes visible.
   // Single RAF + short delay ensures DOM layout is settled before measuring.
+  // Skip auto-focus when the tab change came from a keyboard shortcut —
+  // otherwise the user gets trapped in the terminal and can't keep navigating.
   useEffect(() => {
     if (visible && !suspended && termRef.current) {
+      const skipFocus = isKeyboardNavActive();
       termRef.current.scrollToBottom();
-      termRef.current.focus();
+      if (!skipFocus) termRef.current.focus();
       let cancelled = false;
       requestAnimationFrame(() => {
         if (cancelled) return;
@@ -601,7 +605,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
             }
           }
           term.scrollToBottom();
-          term.focus();
+          if (!skipFocus) term.focus();
         }
       });
       return () => { cancelled = true; };

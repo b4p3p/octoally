@@ -35,9 +35,12 @@ import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { ConfirmModal } from './ConfirmModal';
 import { RufloDeprecationModal } from './RufloDeprecationModal';
 import { StatuslinePromptModal } from './StatuslinePromptModal';
+import { useShortcut } from '../lib/shortcuts';
 
 interface ProjectDashboardProps {
   onOpenProject: (projectId: string, projectName: string, quickLaunch?: 'session' | 'agent' | 'terminal', cliType?: 'claude' | 'codex') => void;
+  active?: boolean;
+  onSelectedProjectChange?: (projectId: string | null) => void;
 }
 
 type ViewState = { mode: 'list' } | { mode: 'add' } | { mode: 'edit'; project: Project };
@@ -1313,9 +1316,11 @@ function CreateRepoModal({ projectPath, onClose, onCreated }: {
   );
 }
 
-export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
+export function ProjectDashboard({ onOpenProject, active = true, onSelectedProjectChange }: ProjectDashboardProps) {
   const [view, setView] = useState<ViewState>({ mode: 'list' });
   const queryClient = useQueryClient();
+  const [selectedCardIndex, setSelectedCardIndex] = useState<number | null>(null);
+  const selectedCardRef = useRef<HTMLDivElement | null>(null);
 
   // Listen for open-project events from the form's create success handler
   useEffect(() => {
@@ -1345,6 +1350,83 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
         (p.description && p.description.toLowerCase().includes(q))
     );
   }, [allProjects, searchQuery]);
+
+  // Keyboard card navigation — only active when this page is visible and not
+  // in add/edit view. Arrow keys move selection; Enter opens the selected
+  // card. Selection is null initially; first arrow press picks card 0.
+  const cardsActive = active && view.mode === 'list';
+  useShortcut('home.nextCard', () => {
+    if (projects.length === 0) return;
+    setSelectedCardIndex((prev) => {
+      if (prev === null) return 0;
+      return (prev + 1) % projects.length;
+    });
+  }, cardsActive);
+  useShortcut('home.prevCard', () => {
+    if (projects.length === 0) return;
+    setSelectedCardIndex((prev) => {
+      if (prev === null) return projects.length - 1;
+      return (prev - 1 + projects.length) % projects.length;
+    });
+  }, cardsActive);
+  useShortcut('home.openSelectedCard', () => {
+    if (selectedCardIndex === null) return;
+    const p = projects[selectedCardIndex];
+    if (p) onOpenProject(p.id, p.name);
+  }, cardsActive);
+
+  // Row navigation — measure the grid's column count at runtime (responsive
+  // breakpoints: 1 / 2 / 3 / 4 cols) and jump by that many cards.
+  const getColumnCount = useCallback((): number => {
+    const cards = Array.from(document.querySelectorAll<HTMLElement>('[data-project-card]'));
+    if (cards.length <= 1) return 1;
+    const firstTop = cards[0].offsetTop;
+    let count = 0;
+    for (const c of cards) {
+      if (c.offsetTop !== firstTop) break;
+      count++;
+    }
+    return Math.max(1, count);
+  }, []);
+  useShortcut('home.nextRowCard', () => {
+    if (projects.length === 0) return;
+    const cols = getColumnCount();
+    setSelectedCardIndex((prev) => {
+      const cur = prev ?? -cols;
+      return Math.min(cur + cols, projects.length - 1);
+    });
+  }, cardsActive);
+  useShortcut('home.prevRowCard', () => {
+    if (projects.length === 0) return;
+    const cols = getColumnCount();
+    setSelectedCardIndex((prev) => {
+      const cur = prev ?? projects.length;
+      return Math.max(cur - cols, 0);
+    });
+  }, cardsActive);
+
+  // Clamp selection to valid range when projects list changes.
+  useEffect(() => {
+    if (selectedCardIndex === null) return;
+    if (selectedCardIndex >= projects.length) {
+      setSelectedCardIndex(projects.length === 0 ? null : projects.length - 1);
+    }
+  }, [projects.length, selectedCardIndex]);
+
+  // Scroll the selected card into view when it changes via keyboard.
+  useEffect(() => {
+    if (selectedCardRef.current) {
+      selectedCardRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [selectedCardIndex]);
+
+  // Expose the currently-selected project to the parent so launch shortcuts
+  // (Alt+Shift+K / X, Ctrl+Shift+T) can target it when we're on the home page.
+  useEffect(() => {
+    if (!onSelectedProjectChange) return;
+    const id = selectedCardIndex !== null ? projects[selectedCardIndex]?.id ?? null : null;
+    onSelectedProjectChange(id);
+  }, [selectedCardIndex, projects, onSelectedProjectChange]);
 
   // Claude-flow status — rufloStatus route removed; use empty data
   const cfStatusData = undefined as { statuses: Record<string, any> } | undefined;
@@ -1672,15 +1754,22 @@ export function ProjectDashboard({ onOpenProject }: ProjectDashboardProps) {
                     <div className="flex-1 h-px ml-2" style={{ background: 'var(--border)' }} />
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                    {projects.map((project) => {
+                    {projects.map((project, idx) => {
               const cfStatus = cfStatuses[project.id];
               const isUninstalling = uninstallingId === project.id;
+              const isSelected = selectedCardIndex === idx;
 
               return (
                 <div
                   key={project.id}
+                  ref={isSelected ? selectedCardRef : undefined}
+                  data-project-card={idx}
                   className="rounded-xl border flex flex-col group hover:border-[var(--accent)] transition-colors overflow-hidden cursor-pointer"
-                  style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border)' }}
+                  style={{
+                    background: 'var(--bg-secondary)',
+                    borderColor: isSelected ? 'var(--accent)' : 'var(--border)',
+                    boxShadow: isSelected ? '0 0 0 2px var(--accent)' : undefined,
+                  }}
                   onClick={() => onOpenProject(project.id, project.name)}
                 >
                   {/* Ruflo deprecation notice — only shown before user has decided (undecided disposition) */}
