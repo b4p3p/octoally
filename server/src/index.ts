@@ -265,7 +265,7 @@ async function start() {
     serverVersion = pkg.version || '0.0.0';
   } catch {}
 
-  app.get('/api/health', async () => {
+  app.get('/api/health', { logLevel: 'silent' }, async () => {
     const reconnect = getReconnectStatus();
     return {
       name: 'octoally',
