@@ -455,13 +455,133 @@ fi
 if command -v hivecommand &>/dev/null; then
   hivecommand stop 2>/dev/null || true
 fi
-# Fallback: kill any remaining server process on our port
+# Fallback: kill any remaining server process on our port. Respect a
+# user-customized port — read from existing server/.env or settings DB before
+# the extraction replaces $INSTALL_DIR. Falls back to 42010.
+_resolve_install_port() {
+  local default_port=42010
+  if [ -n "${PORT:-}" ] && [[ "${PORT}" =~ ^[0-9]+$ ]]; then echo "$PORT"; return; fi
+  local env_file="$INSTALL_DIR/server/.env"
+  if [ -f "$env_file" ]; then
+    local p
+    p=$(grep -E '^[[:space:]]*PORT[[:space:]]*=' "$env_file" 2>/dev/null | tail -1 \
+        | sed -E 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"'][[:space:]]*$//; s/[[:space:]]*$//' || true)
+    if [[ "$p" =~ ^[0-9]+$ ]]; then echo "$p"; return; fi
+  fi
+  local db="$TARGET_HOME/.octoally/octoally.db"
+  if [ -f "$db" ]; then
+    local p=""
+    if command -v sqlite3 >/dev/null 2>&1; then
+      p=$(sqlite3 "$db" "SELECT value FROM settings WHERE key='server_port' LIMIT 1;" 2>/dev/null || true)
+    elif command -v node >/dev/null 2>&1 && [ -d "$INSTALL_DIR/server/node_modules/better-sqlite3" ]; then
+      p=$(DB="$db" NM="$INSTALL_DIR/server/node_modules" node -e '
+        try { const D=require(process.env.NM+"/better-sqlite3");
+          const db=new D(process.env.DB,{readonly:true,fileMustExist:true});
+          const r=db.prepare("SELECT value FROM settings WHERE key=?").get("server_port");
+          db.close(); if(r&&r.value) process.stdout.write(String(r.value));
+        } catch(e){}' 2>/dev/null || true)
+    fi
+    if [[ "$p" =~ ^[0-9]+$ ]]; then echo "$p"; return; fi
+  fi
+  echo "$default_port"
+}
+KILL_PORT="$(_resolve_install_port)"
 if command -v fuser &>/dev/null; then
-  fuser -k 42010/tcp 2>/dev/null || true
+  if fuser -s "${KILL_PORT}/tcp" 2>/dev/null; then
+    log_info "Force-stopping process on port ${KILL_PORT}..."
+    fuser -k -TERM "${KILL_PORT}/tcp" 2>/dev/null || true
+    sleep 1
+    fuser -s "${KILL_PORT}/tcp" 2>/dev/null && fuser -k -KILL "${KILL_PORT}/tcp" 2>/dev/null || true
+  fi
 elif command -v lsof &>/dev/null; then
   # macOS: lsof is available where fuser is not
-  lsof -ti tcp:42010 2>/dev/null | xargs kill -9 2>/dev/null || true
+  pids="$(lsof -ti "tcp:${KILL_PORT}" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    log_info "Force-stopping process on port ${KILL_PORT}..."
+    echo "$pids" | xargs -r kill -TERM 2>/dev/null || true
+    sleep 1
+    pids="$(lsof -ti "tcp:${KILL_PORT}" 2>/dev/null || true)"
+    [ -n "$pids" ] && echo "$pids" | xargs -r kill -KILL 2>/dev/null || true
+  fi
 fi
+
+# Catch stale octoally servers the port-based kill above missed. Port-based
+# detection is blind to any prior install bound to a non-default port — a
+# leftover server on 42011 (old default) or a dev-mode PORT=42012 survives
+# every subsequent upgrade. Mirrors octoally-pro's _kill_stale_pro_servers.
+#
+# CRITICAL: match "octoally/server" WITHOUT matching "octoally-pro/server".
+# Pro is a separate app with its own installer; we must never touch it. Every
+# pattern below either explicitly excludes "octoally-pro" or uses a case
+# ordering that short-circuits on it first. Verified against a machine running
+# both apps before shipping.
+_kill_stale_octoally_servers() {
+  local target_uid
+  target_uid=$(id -u "$TARGET_USER" 2>/dev/null || echo "")
+  [ -z "$target_uid" ] && return 0
+
+  local pids=""
+
+  # Pattern 1: pgrep cmdline match, then explicitly filter out Pro cmdlines.
+  # pgrep's regex doesn't do negative lookahead, so we post-filter instead.
+  if command -v pgrep >/dev/null 2>&1; then
+    for pid in $(pgrep -u "$target_uid" -f 'octoally/server/dist/index\.js' 2>/dev/null); do
+      local cl
+      cl=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo '')
+      case "$cl" in
+        *octoally-pro*) continue ;;
+      esac
+      pids="$pids $pid"
+    done
+  fi
+
+  # Pattern 2: Linux /proc/cwd — case ordering matters. Pro exclusion fires
+  # FIRST so "*/octoally-pro/server/*" short-circuits before it could match
+  # "*/octoally/server/*".
+  if [ -d /proc ]; then
+    for pid_dir in /proc/[0-9]*; do
+      local pid="${pid_dir##*/}"
+      [ "$pid" = "$$" ] && continue
+      [ "$pid" = "$PPID" ] && continue
+      local p_uid
+      p_uid=$(stat -c %u "$pid_dir" 2>/dev/null || echo "-1")
+      [ "$p_uid" = "$target_uid" ] || continue
+      local cwd
+      cwd=$(readlink "$pid_dir/cwd" 2>/dev/null || true)
+      case "$cwd" in
+        */octoally-pro/*) continue ;;
+        */octoally/server|*/octoally/server/*) ;;
+        *) continue ;;
+      esac
+      local cmdline
+      cmdline=$(tr '\0' ' ' < "$pid_dir/cmdline" 2>/dev/null || true)
+      case "$cmdline" in
+        *pty-worker*) continue ;;
+        *octoally-pro*) continue ;;
+        *node*dist/index.js*) pids="$pids $pid" ;;
+      esac
+    done
+  fi
+
+  pids=$(echo "$pids" | tr ' ' '\n' | sort -u | grep -v '^$' || true)
+  [ -z "$pids" ] && return 0
+
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    [ "$pid" = "$PPID" ] && continue
+    log_info "Stopping stale octoally server (PID $pid)..."
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  sleep 2
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    [ "$pid" = "$PPID" ] && continue
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+_kill_stale_octoally_servers
 
 # Kill running desktop app — SIGTERM first, then SIGKILL after 1s.
 # Electron hangs on close when the server is dead (webview stuck reconnecting).
@@ -513,8 +633,17 @@ fi
 cd "$INSTALL_DIR" || cd /
 log_info "Installing server dependencies..."
 if ! npm install --omit=dev --prefix "$INSTALL_DIR/server" 2>&1; then
-  log_error "npm install failed — see errors above"
-  exit 1
+  # On Node 22+, node-gyp 11.x has a known post-build ENOENT on
+  # `build/node_gyp_bins` that exits non-zero even when the native module
+  # actually built successfully. If better-sqlite3 and node-pty load, the
+  # install is functionally complete — accept it and continue.
+  if (cd "$INSTALL_DIR/server" \
+       && node -e "require('better-sqlite3'); require('node-pty-prebuilt-multiarch')") >/dev/null 2>&1; then
+    log_warn "npm install exited non-zero, but native modules load — continuing"
+  else
+    log_error "npm install failed — see errors above"
+    exit 1
+  fi
 fi
 
 log_ok "OctoAlly v${VERSION} installed to $INSTALL_DIR"

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Terminal as XTerm } from '@xterm/xterm';
@@ -7,6 +7,10 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { RotateCcw, ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
 import { useSpeechStore } from '../lib/speech';
+import { isKeyboardNavActive } from '../lib/shortcuts';
+import { api } from '../lib/api';
+import { HistoryViewer } from './HistoryViewer';
+import '@xterm/xterm/css/xterm.css';
 
 const POPOUT_SKIP_KEY = 'octoally-popout-confirm-skip';
 function shouldSkipPopOutConfirm(): boolean {
@@ -15,9 +19,6 @@ function shouldSkipPopOutConfirm(): boolean {
 function setSkipPopOutConfirm(skip: boolean): void {
   try { localStorage.setItem(POPOUT_SKIP_KEY, String(skip)); } catch { /* ignore */ }
 }
-import { api } from '../lib/api';
-import { HistoryViewer } from './HistoryViewer';
-import '@xterm/xterm/css/xterm.css';
 
 // Global event: when any terminal connects, notify all others to retry immediately.
 // This prevents staggered reconnects after a server restart.
@@ -108,6 +109,57 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   // effects (suspension + visible) from stacking duplicate captures.
   const codexRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   isSuspendedRef.current = suspended;
+
+  // Hard refresh — the dedicated "screen is messed up, fix it" path. Always
+  // clears the xterm buffer first so stale stacked renders are discarded,
+  // then forces the CLI to redraw into the clean buffer. Intentionally heavier
+  // than the passive refit that tab switches / visibility changes use.
+  const hardRefresh = useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    const fit = fitRef.current;
+    const w = wsRef.current;
+    if (fit) fit.fit();
+
+    if (!w || w.readyState !== WebSocket.OPEN) {
+      // WebSocket not open — full reconnect, server will replay into clean buffer
+      term.reset();
+      disconnectFnRef.current?.();
+      setTimeout(() => connectFnRef.current?.(), 50);
+      return;
+    }
+
+    if (cliTypeRef.current === 'codex') {
+      // Codex doesn't redraw on SIGWINCH. Send resize so tmux pane matches
+      // our width, then clear and request a capture-pane refresh.
+      w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      setTimeout(() => {
+        if (w.readyState !== WebSocket.OPEN) return;
+        term.reset();
+        w.send(JSON.stringify({ type: 'refresh' }));
+      }, 300);
+      return;
+    }
+
+    if (hideCursorRef.current) {
+      // Claude session/agent: reset first to clear stacked renders, then
+      // SIGWINCH-toggle so Claude redraws into the now-clean buffer.
+      term.reset();
+      const cols = term.cols;
+      const rows = term.rows;
+      w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
+      setTimeout(() => {
+        if (w.readyState !== WebSocket.OPEN) return;
+        w.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }, 100);
+      return;
+    }
+
+    // Plain terminal — reconnect for a fresh server replay.
+    term.reset();
+    disconnectFnRef.current?.();
+    setTimeout(() => connectFnRef.current?.(), 50);
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -601,10 +653,13 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
 
   // Re-focus and refit terminal when it becomes visible.
   // Single RAF + short delay ensures DOM layout is settled before measuring.
+  // Skip auto-focus when the tab change came from a keyboard shortcut —
+  // otherwise the user gets trapped in the terminal and can't keep navigating.
   useEffect(() => {
     if (visible && !suspended && termRef.current) {
+      const skipFocus = isKeyboardNavActive();
       termRef.current.scrollToBottom();
-      termRef.current.focus();
+      if (!skipFocus) termRef.current.focus();
       let cancelled = false;
       requestAnimationFrame(() => {
         if (cancelled) return;
@@ -630,7 +685,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
             }
           }
           term.scrollToBottom();
-          term.focus();
+          if (!skipFocus) term.focus();
         }
       });
       return () => { cancelled = true; };
@@ -694,44 +749,17 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     return () => window.removeEventListener('octoally:terminal-input', handler);
   }, [visible, suspended]);
 
-  // Voice command / refresh button: refresh terminal display
+  // Voice command / external refresh event — shares the hardRefresh path so
+  // voice "refresh terminal" and the refresh button behave identically.
   useEffect(() => {
     const handler = (e: Event) => {
       const { sessionId: targetId } = (e as CustomEvent).detail;
       if (targetId !== sessionId) return;
-      const term = termRef.current;
-      if (!term) return;
-      const fit = fitRef.current;
-      if (fit) fit.fit();
-      const w = wsRef.current;
-      if (!w || w.readyState !== WebSocket.OPEN) {
-        term.reset();
-        disconnectFnRef.current?.();
-        setTimeout(() => connectFnRef.current?.(), 50);
-      } else if (cliType === 'codex') {
-        // Send resize first — tmux pane may be at wrong width (e.g. from
-        // Active Sessions grid). Then let Codex reflow before capturing.
-        w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        setTimeout(() => {
-          if (w.readyState === WebSocket.OPEN) {
-            term.reset();
-            w.send(JSON.stringify({ type: 'refresh' }));
-          }
-        }, 300);
-      } else if (hideCursorRef.current) {
-        const cols = term.cols;
-        const rows = term.rows;
-        w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
-        setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols, rows })), 100);
-      } else {
-        term.reset();
-        disconnectFnRef.current?.();
-        setTimeout(() => connectFnRef.current?.(), 50);
-      }
+      hardRefresh();
     };
     window.addEventListener('octoally:refresh-terminal', handler);
     return () => window.removeEventListener('octoally:refresh-terminal', handler);
-  }, [sessionId, cliType]);
+  }, [sessionId, hardRefresh]);
 
   // Focus terminal on demand (e.g. switching from grid to single view)
   useEffect(() => {
@@ -813,34 +841,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
               <ExternalLink className="w-3 h-3" />
             </button>
             <button
-              onClick={() => {
-                const term = termRef.current;
-                const w = wsRef.current;
-                const fit = fitRef.current;
-                if (!term) return;
-                if (fit) fit.fit();
-                if (!w || w.readyState !== WebSocket.OPEN) {
-                  // WebSocket not open — full reconnect
-                  term.reset();
-                  disconnectFnRef.current?.();
-                  setTimeout(() => connectFnRef.current?.(), 50);
-                } else if (cliType === 'codex') {
-                  // Codex: capture-pane refresh (Codex doesn't redraw on SIGWINCH)
-                  term.reset();
-                  w.send(JSON.stringify({ type: 'refresh' }));
-                } else if (hideCursorRef.current) {
-                  // Claude session/agent: resize-toggle forces SIGWINCH redraw
-                  const cols = term.cols;
-                  const rows = term.rows;
-                  w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
-                  setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols, rows })), 100);
-                } else {
-                  // Plain terminal: reconnect for fresh replay
-                  term.reset();
-                  disconnectFnRef.current?.();
-                  setTimeout(() => connectFnRef.current?.(), 50);
-                }
-              }}
+              onClick={hardRefresh}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
               style={{ background: 'var(--accent)', color: 'white' }}
               title="Refresh terminal display"

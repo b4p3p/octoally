@@ -10,6 +10,7 @@ import { SessionLauncher } from './SessionLauncher';
 import { WebPageView } from './WebPageView';
 import { api } from '../lib/api';
 import { CloseTabModal } from './CloseTabModal';
+import { useShortcut, markKeyboardNav } from '../lib/shortcuts';
 
 interface ProjectViewProps {
   projectId: string;
@@ -154,6 +155,20 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
     initialized?.activeMode ?? 'terminal'
   );
 
+  // Sidebar navigation shortcuts — only the active (visible) project view
+  // registers these, so shortcuts switch the sidebar of the project the user
+  // is looking at, not a background tab's.
+  const cycleSidebar = useCallback((delta: number) => {
+    const order = sidebarButtons.map((b) => b.id);
+    const idx = order.indexOf(activeMode as typeof order[number]);
+    const next = order[((idx === -1 ? 0 : idx) + delta + order.length) % order.length];
+    markKeyboardNav();
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    setActiveMode(next);
+  }, [activeMode]);
+  useShortcut('nav.nextSidebar', () => cycleSidebar(1), active);
+  useShortcut('nav.prevSidebar', () => cycleSidebar(-1), active);
+
   // Discover external sessions available for adoption.
   // Auto-poll on a slow interval so popped-out sessions surface a "Bring back"
   // affordance without requiring a manual scan; user can still trigger an
@@ -174,6 +189,55 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(
     initialized?.activeTerminalId ?? null
   );
+
+  // Terminal-tab cycling shortcut — match the click-on-tab code path exactly
+  // so perf is identical to clicking. No markKeyboardNav (that skips focus
+  // which was causing xterm render issues on terminal tab switch). Debounced
+  // so rapid keystrokes only trigger one switch instead of N reconnects.
+  const pendingTabDeltaRef = useRef(0);
+  const tabDebounceTimerRef = useRef<number | null>(null);
+  const cycleTerminalTab = useCallback((delta: number) => {
+    if (terminalInstances.length === 0) return;
+    pendingTabDeltaRef.current += delta;
+    if (tabDebounceTimerRef.current !== null) {
+      window.clearTimeout(tabDebounceTimerRef.current);
+    }
+    tabDebounceTimerRef.current = window.setTimeout(() => {
+      const d = pendingTabDeltaRef.current;
+      pendingTabDeltaRef.current = 0;
+      tabDebounceTimerRef.current = null;
+      if (terminalInstances.length === 0) return;
+      const ids = terminalInstances.map((t) => t.id);
+      const current = activeTerminalId ?? ids[0];
+      const idx = ids.indexOf(current);
+      const next = ids[((idx === -1 ? 0 : idx) + d + ids.length * 100) % ids.length];
+      // Mirror the onClick handler on the terminal tab button exactly.
+      setActiveTerminalId(next);
+      setActiveWebPageId(null);
+      setShowLauncher(false);
+      setShowAllTerminals(false);
+      setActiveMode('terminal');
+      focusTerminalById(next);
+    }, 180);
+  }, [terminalInstances, activeTerminalId]);
+  useShortcut('terminal.nextTab', () => cycleTerminalTab(1), active);
+  useShortcut('terminal.prevTab', () => cycleTerminalTab(-1), active);
+
+  // Close active terminal/agent tab — opens the confirm modal with the same
+  // args as the X button on the tab pill. CloseTabModal auto-focuses "Close
+  // & Kill" so Enter confirms kill.
+  useShortcut('terminal.closeTab', () => {
+    if (!activeTerminalId) return;
+    const inst = terminalInstances.find((t) => t.id === activeTerminalId);
+    if (!inst) return;
+    const type = inst.label.startsWith('Terminal')
+      ? 'terminal'
+      : inst.label.startsWith('Agent')
+      ? 'agent'
+      : 'session';
+    setCloseConfirm({ id: inst.id, label: inst.label, type });
+  }, active);
+
   const [showLauncher, setShowLauncher] = useState(
     initialized?.showLauncher ?? true
   );

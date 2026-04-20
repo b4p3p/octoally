@@ -18,6 +18,7 @@ import { ModelDownloadModal } from './components/ModelDownloadModal';
 import { initSpeechListeners } from './lib/speech';
 import { onVoiceCommand } from './lib/voice-commands';
 import type { VoiceCommandPayload } from './lib/voice-commands';
+import { installShortcutDispatcher, useShortcut, useShortcutStore, markKeyboardNav } from './lib/shortcuts';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -84,7 +85,18 @@ function Dashboard() {
     if (size) {
       document.documentElement.style.setProperty('--app-font-size', `${size}px`);
     }
+    // Hydrate shortcut bindings as soon as settings arrive
+    const bindingsRaw = appSettings?.settings?.shortcut_bindings;
+    if (bindingsRaw !== undefined) {
+      useShortcutStore.getState().hydrate(bindingsRaw);
+    }
   }, [appSettings]);
+
+  // Install the global keydown dispatcher once
+  useEffect(() => {
+    const uninstall = installShortcutDispatcher();
+    return () => uninstall();
+  }, []);
 
   // Track hidden session IDs reported by each ProjectView
   const hiddenSessionIdsRef = useRef<Map<string, string[]>>(new Map());
@@ -293,6 +305,53 @@ function Dashboard() {
   useEffect(() => {
     saveAppState(activeTab, projectTabs);
   }, [activeTab, projectTabs]);
+
+  // Tab navigation shortcuts — cycle across 'home' + open project tabs.
+  // markKeyboardNav() raises a short-lived flag so the newly visible
+  // terminal doesn't auto-focus (which would trap the user). Click-to-switch
+  // doesn't set the flag, so clicks keep the current focus-terminal behavior.
+  const cycleTab = useCallback((delta: number) => {
+    const order: string[] = ['home', ...projectTabs.map((t) => `project-${t.projectId}`)];
+    if (order.length <= 1) return;
+    const idx = order.indexOf(activeTab);
+    const next = order[((idx === -1 ? 0 : idx) + delta + order.length) % order.length];
+    markKeyboardNav();
+    // Blur whatever has focus (usually the terminal helper textarea) so focus
+    // doesn't stay "inside" the previous tab after we switch.
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    setActiveTab(next);
+  }, [activeTab, projectTabs]);
+
+  useShortcut('nav.nextTab', () => cycleTab(1));
+  useShortcut('nav.prevTab', () => cycleTab(-1));
+  useShortcut('nav.goHome', () => setActiveTab('home'));
+
+  // Launch shortcuts — resolve "current project" as (a) the active project
+  // tab, or (b) the selected card on the home page. ProjectDashboard reports
+  // its current selection via onSelectedProjectChange into the ref.
+  const homeSelectedProjectIdRef = useRef<string | null>(null);
+  const resolveCurrentProjectId = useCallback((): string | null => {
+    if (activeTab.startsWith('project-')) return activeTab.slice('project-'.length);
+    if (activeTab === 'home') return homeSelectedProjectIdRef.current;
+    return null;
+  }, [activeTab]);
+  const launchForCurrent = useCallback((quickLaunch: 'session' | 'terminal', cliType?: 'claude' | 'codex') => {
+    const pid = resolveCurrentProjectId();
+    if (!pid) return;
+    const project = projects.find((p) => p.id === pid);
+    if (!project) return;
+    handleOpenProject(pid, project.name, quickLaunch, cliType);
+  }, [projects, resolveCurrentProjectId]);
+  useShortcut('session.launchClaude', () => launchForCurrent('session', 'claude'));
+  useShortcut('session.launchCodex', () => launchForCurrent('session', 'codex'));
+  useShortcut('session.launchTerminal', () => launchForCurrent('terminal'));
+
+  // Release focus from any input/terminal — gives users a way to "escape" the
+  // terminal input back to a no-focus state. Unbound by default.
+  useShortcut('nav.blurInput', () => {
+    const el = document.activeElement as HTMLElement | null;
+    if (el && typeof el.blur === 'function') el.blur();
+  });
 
   function handleOpenProject(projectId: string, projectName: string, quickLaunch?: 'session' | 'agent' | 'terminal', cliType?: 'claude' | 'codex') {
     setProjectTabs((prev) => {
@@ -592,7 +651,11 @@ function Dashboard() {
           className="h-full"
           style={{ display: activeTab === 'home' ? 'block' : 'none' }}
         >
-          <ProjectDashboard onOpenProject={handleOpenProject} />
+          <ProjectDashboard
+            onOpenProject={handleOpenProject}
+            active={activeTab === 'home'}
+            onSelectedProjectChange={(id) => { homeSelectedProjectIdRef.current = id; }}
+          />
         </div>
         {projectTabs.map((tab) => {
           const tabId = `project-${tab.projectId}`;

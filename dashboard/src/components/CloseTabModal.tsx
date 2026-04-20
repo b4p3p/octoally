@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { AlertTriangle, EyeOff, Trash2 } from 'lucide-react';
+import { pushSuspend } from '../lib/shortcuts';
 
 interface CloseTabModalProps {
   /** e.g. "Session 1", "Terminal 2" */
@@ -27,12 +28,20 @@ export function CloseTabModal({
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    // Default focus on Cancel — Enter on a destructive action is too easy to
+    // trigger accidentally when the modal pops up from a stray shortcut.
     cancelRef.current?.focus();
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel();
     };
     window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
+    // Suspend global shortcuts while the confirm is open so the same key
+    // that opened this modal (e.g. Ctrl+Shift+X) can't re-trigger it.
+    const release = pushSuspend();
+    return () => {
+      window.removeEventListener('keydown', handleKey);
+      release();
+    };
   }, [onCancel]);
 
   const isProject = type === 'project';

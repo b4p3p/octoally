@@ -7,6 +7,7 @@ import {
   onTranscription,
   offTranscription,
 } from '../lib/speech';
+import { useShortcut } from '../lib/shortcuts';
 
 /**
  * Top-bar dictation button. Pure dictation — inserts transcribed text at the
@@ -113,6 +114,24 @@ export function GlobalDictationButton() {
       const s = useSpeechStore.getState();
       if (s.dictationMode) s.setDictationMode(false);
       await stopMic();
+      // Restore focus to the last editable target (or nearest editable / xterm
+      // helper) so the user can resume typing / press Enter. Otherwise focus
+      // sticks to this button, and the next click or keypress toggles
+      // dictation right back on.
+      const remembered = lastFocusedRef.current;
+      const restoreTarget: HTMLElement | null =
+        remembered instanceof HTMLElement &&
+        isEditable(remembered) &&
+        document.contains(remembered)
+          ? remembered
+          : findBestEditable();
+      if (restoreTarget) {
+        try {
+          restoreTarget.focus({ preventScroll: true } as FocusOptions);
+        } catch {
+          restoreTarget.focus();
+        }
+      }
       return;
     }
     // Pick a target: keep current focus if it's editable, otherwise auto-focus
@@ -139,6 +158,9 @@ export function GlobalDictationButton() {
     setGlobalDictationActive(true);
     await toggleMic('push-to-talk');
   };
+
+  // Keyboard shortcut — same toggle as clicking the button
+  useShortcut('dictation.toggle', () => { void handleClick(); });
 
   return (
     <button

@@ -90,6 +90,19 @@ function runInstallOrUpdate(version) {
   log(CYAN, `Downloading v${version}...`);
   execSync(`curl -fsSL -o "${tmpFile}" "${tarballUrl}"`, { stdio: "inherit" });
 
+  // Kill desktop app FIRST. The desktop supervises the server child and
+  // auto-respawns it the moment we stop the server, creating an orphaned
+  // old-version node process (re-parented to systemd --user on Linux) that
+  // keeps binding port 42010 and holds the old dist/ in memory even after
+  // rm -rf replaces files on disk. Must happen before "octoally stop".
+  if (process.platform === "linux") {
+    try { execSync('pkill -9 -f "octoally-desktop"', { stdio: "pipe" }); } catch {}
+  } else if (process.platform === "darwin") {
+    try { execSync('pkill -9 -f "OctoAlly"', { stdio: "pipe" }); } catch {}
+  }
+  // Brief pause so any spawned server child settles before we stop it
+  try { execSync("sleep 1", { stdio: "pipe" }); } catch {}
+
   // Stop server if running (detect service vs PID)
   let serviceType = null; // "systemd", "launchd", or null (PID-based)
   if (process.platform === "linux") {
@@ -167,10 +180,18 @@ function runInstallOrUpdate(version) {
 
   // Install server dependencies (native modules like better-sqlite3)
   log(CYAN, "Installing dependencies...");
-  execSync(`npm install --omit=dev --prefix "${INSTALL_DIR}/server"`, {
-    cwd: INSTALL_DIR,
-    stdio: "inherit",
-  });
+  try {
+    execSync(`npm install --omit=dev --prefix "${INSTALL_DIR}/server"`, {
+      cwd: INSTALL_DIR,
+      stdio: "inherit",
+    });
+  } catch {
+    // node-gyp 11.x on Node 22+ has a known ENOENT on the post-build cleanup
+    // of build/node_gyp_bins that exits non-zero even when the native module
+    // actually built. Don't abort here — the verify-or-rebuild step below
+    // will catch a genuine failure and recover.
+    log(YELLOW, "npm install exited non-zero — verifying native modules...");
+  }
 
   // Verify native modules load on the current Node. If npm pulled prebuilt
   // binaries that don't match this Node's NODE_MODULE_VERSION (happens when

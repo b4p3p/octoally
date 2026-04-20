@@ -19,6 +19,7 @@ const DEFAULTS: Record<string, string> = {
   ruflo_disposition: 'undecided',   // undecided | keep | remove_all | removed
   statusline_prompted: 'false',    // whether we've asked the user about statusline install
   default_model: '',               // '' = let the CLI use its own default (no --model flag)
+  shortcut_bindings: '{}',         // JSON: { [actionId]: { combo, fireInEditable } }
 };
 
 export function getSetting(key: string): string {
