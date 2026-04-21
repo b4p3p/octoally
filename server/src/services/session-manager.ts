@@ -137,6 +137,7 @@ interface PendingSpawn {
   socketPath?: string;  // for adopt mode
   cliType?: 'claude' | 'codex';
   model?: string;        // optional per-launch model override
+  inheritMcp?: boolean;  // agent mode: inherit user MCP toolset via persona prompt
 }
 const pendingSpawns = new Map<string, PendingSpawn>();
 
@@ -956,7 +957,7 @@ export async function spawnTerminal(sessionId: string, projectPath: string, cols
   });
 }
 
-export async function spawnAgent(sessionId: string, projectPath: string, task: string, agentType: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude', modelOverride?: string): Promise<void> {
+export async function spawnAgent(sessionId: string, projectPath: string, task: string, agentType: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude', modelOverride?: string, inheritMcp = false): Promise<void> {
   const preSpawnFiles = snapshotClaudeSessionFiles(projectPath);
 
   const worker = await forkWorker();
@@ -994,12 +995,13 @@ export async function spawnAgent(sessionId: string, projectPath: string, task: s
     sessionCommand,
     cliType,
     model,
+    inheritMcp,
   });
 
   insertEvent({
     session_id: sessionId,
     type: 'session_start',
-    data: { task, projectPath, tmux: config.useTmux, mode: 'agent', agentType },
+    data: { task, projectPath, tmux: config.useTmux, mode: 'agent', agentType, inheritMcp },
   });
 
   pushSystemEvent(`[OctoAlly] Agent ${agentType} session ${sessionId} started: ${task.slice(0, 60)}`);

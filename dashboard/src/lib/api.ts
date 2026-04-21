@@ -20,7 +20,7 @@ export const api = {
     list: (status?: string) =>
       fetchJSON<{ sessions: Session[] }>(`/sessions${status ? `?status=${status}` : ''}`),
     get: (id: string) => fetchJSON<{ session: Session }>(`/sessions/${id}`),
-    create: (data: { project_path: string; task?: string; mode?: 'session' | 'terminal' | 'agent'; agent_type?: string; project_id?: string; cli_type?: 'claude' | 'codex'; model?: string; remember_model?: boolean }) =>
+    create: (data: { project_path: string; task?: string; mode?: 'session' | 'terminal' | 'agent'; agent_type?: string; project_id?: string; cli_type?: 'claude' | 'codex'; model?: string; remember_model?: boolean; inherit_mcp?: boolean }) =>
       fetchJSON<{ ok: boolean; session: Session }>('/sessions', {
         method: 'POST',
         body: JSON.stringify(data),

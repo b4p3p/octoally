@@ -58,6 +58,10 @@ interface SpawnMessage {
   useTmux: boolean;
   useDtach: boolean;
   workingDir?: string;
+  // Agent mode: when true, bypass --agent flag and inject persona as a
+  // prompt instead. Lets Claude inherit the full user MCP toolset at the
+  // cost of native sub-agent tool-scoping.
+  inheritMcp?: boolean;
 }
 
 interface ReconnectMessage {
@@ -439,7 +443,7 @@ function buildCodexAgentPrompt(agentType: string, task: string, projectPath: str
   return lines.join('\n');
 }
 
-function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', projectPath = '', model = ''): string {
+function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', projectPath = '', model = '', inheritMcp = false): string {
   const escapedType = agentType.replace(/'/g, "'\\''");
   const escapedTask = task.replace(/'/g, "'\\''");
 
@@ -452,6 +456,15 @@ function buildAgentCommand(agentType: string, task: string, direct = false, sess
     const prompt = buildCodexAgentPrompt(agentType, task, projectPath);
     const escapedPrompt = prompt.replace(/'/g, "'\\''");
     cmd = `${baseCmd} --no-alt-screen '${escapedPrompt}'`;
+  } else if (inheritMcp) {
+    // Inherit-MCP mode: skip --agent so Claude runs as a full session with
+    // the user's complete MCP toolset, and fold the agent persona into the
+    // initial prompt (reusing the Codex persona builder).
+    const baseCmd = sessionCmd || 'claude';
+    const mf = modelFlag(model, cliType);
+    const prompt = buildCodexAgentPrompt(agentType, task, projectPath);
+    const escapedPrompt = prompt.replace(/'/g, "'\\''");
+    cmd = `${baseCmd}${mf} '${escapedPrompt}'`;
   } else {
     const baseCmd = sessionCmd || 'claude';
     const mf = modelFlag(model, cliType);
@@ -580,8 +593,8 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
         });
       }
     } else if (msg.mode === 'agent' && msg.agentType) {
-      // agent mode — launch CLI with --agent flag
-      const command = buildAgentCommand(msg.agentType, msg.task, msg.useTmux, sessionCmd, cliType, msg.projectPath, model);
+      // agent mode — launch CLI with --agent flag (or inherit-MCP persona prompt)
+      const command = buildAgentCommand(msg.agentType, msg.task, msg.useTmux, sessionCmd, cliType, msg.projectPath, model, msg.inheritMcp);
       if (msg.useTmux) {
         await tmuxCreate(msg.sessionId, msg.projectPath, msg.cols, msg.rows, command);
         const pp = setupPipePane(msg.sessionId);

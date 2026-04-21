@@ -155,7 +155,7 @@ function TaskModal({
   codexReady: boolean;
   initialCliType?: 'claude' | 'codex';
   onClose: () => void;
-  onLaunch: (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean) => void;
+  onLaunch: (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean, inheritMcp?: boolean) => void;
 }) {
   const [task, setTask] = useState('');
   const [agentType, setAgentType] = useState(agents[0]?.name || 'coder');
@@ -163,6 +163,11 @@ function TaskModal({
   const [sessionPrompt, setSessionPrompt] = useState<string | null>(null);
   const [model, setModel] = useState<string>(project.default_model || '');
   const [rememberModel, setRememberModel] = useState(false);
+  // Agent mode only: when true, launch Claude as a full session with the
+  // agent persona injected as a prompt, so user MCP servers are available.
+  // When false, use the native --agent flag (tool-scoped, no MCP unless
+  // declared in the agent .md).
+  const [inheritMcp, setInheritMcp] = useState(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Wizard state — only used when mode === 'agent'. In session mode the
@@ -191,7 +196,14 @@ function TaskModal({
 
   const handleLaunch = () => {
     const modelToSend = cliType === 'claude' ? model : '';
-    onLaunch(finalTask, mode === 'agent' ? agentType : undefined, cliType, modelToSend, rememberModel && !!modelToSend);
+    onLaunch(
+      finalTask,
+      mode === 'agent' ? agentType : undefined,
+      cliType,
+      modelToSend,
+      rememberModel && !!modelToSend,
+      mode === 'agent' && cliType === 'claude' ? inheritMcp : undefined,
+    );
   };
 
   // Pick an agent and advance to the task step
@@ -544,6 +556,34 @@ function TaskModal({
                 </div>
               )}
 
+              {/* Inherit-MCP toggle — Claude agent mode only. When checked,
+                  Claude launches as a full session with the agent persona in
+                  the prompt, exposing the user's MCP servers to the agent.
+                  When unchecked, uses native --agent (tool-scoped, no MCP). */}
+              {mode === 'agent' && cliType === 'claude' && (
+                <label
+                  className="flex items-start gap-2 cursor-pointer select-none rounded-lg border p-3"
+                  style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)' }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={inheritMcp}
+                    onChange={(e) => setInheritMcp(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 rounded accent-orange-500 shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-semibold" style={{ color: 'var(--text-primary)' }}>
+                      Inherit MCP tools
+                    </div>
+                    <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                      {inheritMcp
+                        ? 'Launches as full session with agent persona in the prompt — all your MCP servers available (chrome-devtools, docs-search, …). Trades native --agent tool scoping for MCP access.'
+                        : 'Uses native --agent flag. Strict tool scope from the agent\'s .md file — MCP tools NOT available unless explicitly declared there.'}
+                    </div>
+                  </div>
+                </label>
+              )}
+
               {/* CLI type + (when Claude) model selector nested under it */}
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
@@ -740,7 +780,7 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
   const agents = agentsData?.agents ?? [];
 
   const createMutation = useMutation({
-    mutationFn: (opts: { task: string; mode: 'session' | 'agent'; agentType?: string; cliType?: 'claude' | 'codex'; model?: string; rememberModel?: boolean }) => {
+    mutationFn: (opts: { task: string; mode: 'session' | 'agent'; agentType?: string; cliType?: 'claude' | 'codex'; model?: string; rememberModel?: boolean; inheritMcp?: boolean }) => {
       return api.sessions.create({
         project_path: project.path,
         task: opts.task,
@@ -750,6 +790,7 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
         cli_type: opts.cliType,
         model: opts.model || undefined,
         remember_model: opts.rememberModel || undefined,
+        inherit_mcp: opts.inheritMcp,
       });
     },
     onSuccess: (data, vars) => {
@@ -774,9 +815,9 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
     },
   });
 
-  const handleLaunch = (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean) => {
+  const handleLaunch = (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean, inheritMcp?: boolean) => {
     const mode = agentType ? 'agent' : 'session';
-    createMutation.mutate({ task, mode, agentType, cliType, model, rememberModel });
+    createMutation.mutate({ task, mode, agentType, cliType, model, rememberModel, inheritMcp });
   };
 
   // Fetch git status for project info (may fail if not a git repo)
