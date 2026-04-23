@@ -664,21 +664,35 @@ if [ -w "/usr/local/bin" ]; then
   ln -sf "$INSTALL_DIR/bin/octoally" "/usr/local/bin/octoally" 2>/dev/null || true
 fi
 
-# Add ~/.local/bin to PATH if not already there
+# Add ~/.local/bin to PATH if not already there. Update every shell rc
+# file that exists so the PATH works regardless of which shell the user
+# actually launches. The old "first match wins, .bashrc first" logic
+# silently failed on macOS users who had a stray .bashrc but used zsh —
+# the export landed in .bashrc and zsh never sourced it, leaving
+# `octoally` invisible despite a successful install.
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$LINK_DIR"; then
-  SHELL_RC=""
-  if [ -f "$TARGET_HOME/.bashrc" ]; then
-    SHELL_RC="$TARGET_HOME/.bashrc"
-  elif [ -f "$TARGET_HOME/.zshrc" ]; then
-    SHELL_RC="$TARGET_HOME/.zshrc"
-  elif [ -f "$TARGET_HOME/.profile" ]; then
-    SHELL_RC="$TARGET_HOME/.profile"
-  fi
-  if [ -n "$SHELL_RC" ]; then
-    if ! grep -q '.local/bin' "$SHELL_RC" 2>/dev/null; then
-      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
-      log_info "Added ~/.local/bin to PATH in $(basename "$SHELL_RC")"
+  EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+  TOUCHED_ANY=false
+  for rc in "$TARGET_HOME/.zshrc" "$TARGET_HOME/.bashrc" "$TARGET_HOME/.bash_profile" "$TARGET_HOME/.profile"; do
+    if [ -f "$rc" ]; then
+      TOUCHED_ANY=true
+      if ! grep -q '.local/bin' "$rc" 2>/dev/null; then
+        echo "$EXPORT_LINE" >> "$rc"
+        log_info "Added ~/.local/bin to PATH in $(basename "$rc")"
+      fi
     fi
+  done
+  if [ "$TOUCHED_ANY" = false ]; then
+    # No rc files exist — create the OS-default so the next shell picks it up.
+    case "$OS" in
+      Darwin*) DEFAULT_RC="$TARGET_HOME/.zshrc" ;;
+      *)       DEFAULT_RC="$TARGET_HOME/.bashrc" ;;
+    esac
+    echo "$EXPORT_LINE" >> "$DEFAULT_RC"
+    if [ "$(id -u)" -eq 0 ] && [ "$TARGET_USER" != "root" ]; then
+      chown "$TARGET_USER:$TARGET_USER" "$DEFAULT_RC" 2>/dev/null || true
+    fi
+    log_info "Created $(basename "$DEFAULT_RC") with ~/.local/bin in PATH"
   fi
   export PATH="$LINK_DIR:$PATH"
 fi
