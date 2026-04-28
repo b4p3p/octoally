@@ -1857,7 +1857,7 @@ export function ProjectDashboard({ onOpenProject, active = true, onSelectedProje
                     <label
                       className="flex items-center gap-1.5 cursor-pointer select-none"
                       onClick={(e) => e.stopPropagation()}
-                      title="Launch Claude sessions with --dangerously-skip-permissions (auto-approve all tool calls)"
+                      title="Launch Claude with --dangerously-skip-permissions and Codex with -a never -s workspace-write"
                     >
                       <input
                         type="checkbox"

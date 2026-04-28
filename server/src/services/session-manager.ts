@@ -883,6 +883,23 @@ function resolveModel(projectPath: string, cliType: 'claude' | 'codex', explicit
   return globalDefault ? globalDefault.trim() : '';
 }
 
+function applySkipPermissionsFlag(sessionCommand: string, cliType: 'claude' | 'codex'): string {
+  if (cliType === 'claude') {
+    return sessionCommand.includes('--dangerously-skip-permissions')
+      ? sessionCommand
+      : `${sessionCommand} --dangerously-skip-permissions`;
+  }
+
+  let command = sessionCommand;
+  const hasApprovalFlag = /(^|\s)(-a|--ask-for-approval)(=|\s|$)/.test(command);
+  const hasSandboxFlag = /(^|\s)(-s|--sandbox)(=|\s|$)/.test(command)
+    || command.includes('--dangerously-bypass-approvals-and-sandbox');
+
+  if (!hasApprovalFlag) command += ' -a never';
+  if (!hasSandboxFlag) command += ' -s workspace-write';
+  return command;
+}
+
 export async function spawnSession(sessionId: string, projectPath: string, task: string, cols = 180, rows = 40, cliType: 'claude' | 'codex' = 'claude', modelOverride?: string): Promise<void> {
   const preSpawnFiles = snapshotClaudeSessionFiles(projectPath);
 
@@ -898,8 +915,8 @@ export async function spawnSession(sessionId: string, projectPath: string, task:
 
   // Check per-project skip_permissions flag
   const proj = getDb().prepare('SELECT skip_permissions FROM projects WHERE path = ?').get(projectPath) as { skip_permissions: number } | undefined;
-  if (proj?.skip_permissions && cliType === 'claude' && !sessionCommand.includes('--dangerously-skip-permissions')) {
-    sessionCommand += ' --dangerously-skip-permissions';
+  if (proj?.skip_permissions) {
+    sessionCommand = applySkipPermissionsFlag(sessionCommand, cliType);
   }
 
   const model = resolveModel(projectPath, cliType, modelOverride);
@@ -972,8 +989,8 @@ export async function spawnAgent(sessionId: string, projectPath: string, task: s
 
   // Check per-project skip_permissions flag
   const proj = getDb().prepare('SELECT skip_permissions FROM projects WHERE path = ?').get(projectPath) as { skip_permissions: number } | undefined;
-  if (proj?.skip_permissions && cliType === 'claude' && !sessionCommand.includes('--dangerously-skip-permissions')) {
-    sessionCommand += ' --dangerously-skip-permissions';
+  if (proj?.skip_permissions) {
+    sessionCommand = applySkipPermissionsFlag(sessionCommand, cliType);
   }
 
   const model = resolveModel(projectPath, cliType, modelOverride);
