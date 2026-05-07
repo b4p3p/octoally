@@ -140,7 +140,7 @@ const INTENTS: IntentDef[] = [
 
 type WizardStep = 'intent' | 'agent' | 'browse-all' | 'task';
 
-function TaskModal({
+export function TaskModal({
   mode,
   project,
   agents,

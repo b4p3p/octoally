@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { Monitor, FolderTree, Code2, GitBranch, Home, Plus, X, Download, LayoutGrid, Maximize2, Minimize2, ExternalLink, Globe, Zap, Bot, TerminalSquare, Columns3, Rows3, ChevronDown } from 'lucide-react';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { Terminal } from './Terminal';
 import { FileExplorer } from './FileExplorer';
 import { GitPanel } from './GitPanel';
-import { SessionLauncher } from './SessionLauncher';
+import { SessionLauncher, TaskModal } from './SessionLauncher';
 import { WebPageView } from './WebPageView';
 import { api } from '../lib/api';
 import { CloseTabModal } from './CloseTabModal';
@@ -242,6 +242,39 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
     initialized?.showLauncher ?? true
   );
   const [pendingLaunch, setPendingLaunch] = useState<{ mode: 'agent' | 'session'; cliType: 'claude' | 'codex' } | null>(null);
+  // Quick-launch modal — overlay invoked by the "+" button next to the Home tab,
+  // so users can spawn another session without navigating back to Home first.
+  const [quickLaunchMode, setQuickLaunchMode] = useState<'session' | 'agent' | null>(null);
+  const { data: quickLaunchAgentsData } = useQuery({
+    queryKey: ['project-agents', projectId],
+    queryFn: () => api.projects.rufloAgents(projectId),
+    staleTime: 120_000,
+    enabled: quickLaunchMode !== null,
+  });
+  const quickLaunchAgents = quickLaunchAgentsData?.agents ?? [];
+  const quickLaunchMutation = useMutation({
+    mutationFn: (opts: { task: string; mode: 'session' | 'agent'; agentType?: string; cliType?: 'claude' | 'codex'; model?: string; rememberModel?: boolean; inheritMcp?: boolean }) => {
+      return api.sessions.create({
+        project_path: projectPath,
+        task: opts.task,
+        mode: opts.mode,
+        agent_type: opts.agentType,
+        project_id: projectId,
+        cli_type: opts.cliType,
+        model: opts.model || undefined,
+        remember_model: opts.rememberModel || undefined,
+        inherit_mcp: opts.inheritMcp,
+      });
+    },
+    onSuccess: (data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      if (vars.rememberModel) queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setQuickLaunchMode(null);
+      if (data.session?.id) {
+        handleSessionCreated(data.session.id, undefined, 'session');
+      }
+    },
+  });
   const [showAllTerminals, setShowAllTerminals] = useState(false);
   const [expandedTerminalId, setExpandedTerminalId] = useState<string | null>(null);
   const [gridFocusedId, setGridFocusedId] = useState<string | null>(null);
@@ -977,6 +1010,23 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                 >
                   <Home className="w-3 h-3" />
                   Home
+                </button>
+
+                {/* New session — opens the launch modal as an overlay so the
+                    user doesn't have to detour through Home to spawn another
+                    session in this project. */}
+                <button
+                  onClick={() => setQuickLaunchMode('session')}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-md shrink-0 transition-colors text-xs font-medium"
+                  title="New session"
+                  style={{
+                    color: 'var(--accent)',
+                    background: 'var(--bg-tertiary)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  <Plus className="w-3 h-3" />
+                  New
                 </button>
 
                 {/* Terminal session sub-tabs */}
@@ -1729,6 +1779,30 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
             setCloseConfirm(null);
           }}
           onCancel={() => setCloseConfirm(null)}
+        />
+      )}
+
+      {/* Quick-launch modal — same TaskModal used by the Home/launcher screen,
+          but rendered here as an overlay so the user doesn't lose their active
+          session view. */}
+      {quickLaunchMode && project && (
+        <TaskModal
+          mode={quickLaunchMode}
+          project={project}
+          agents={quickLaunchAgents}
+          codexReady={true}
+          onClose={() => setQuickLaunchMode(null)}
+          onLaunch={(task, agentType, cliType, model, rememberModel, inheritMcp) => {
+            quickLaunchMutation.mutate({
+              task,
+              mode: agentType ? 'agent' : 'session',
+              agentType,
+              cliType,
+              model,
+              rememberModel,
+              inheritMcp,
+            });
+          }}
         />
       )}
     </div>
