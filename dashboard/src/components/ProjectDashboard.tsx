@@ -240,6 +240,7 @@ function ProjectForm({
     mutationFn: () => {
       const fields: Record<string, string | number | null | undefined> = {};
       if (name !== project!.name) fields.name = name;
+      if (path.trim() && path.trim() !== project!.path) fields.path = path.trim();
       if (description !== (project!.description || '')) fields.description = description;
       if (defaultWebUrl !== (project!.default_web_url || '')) fields.default_web_url = defaultWebUrl || null;
       if (defaultModel !== (project!.default_model || '')) fields.default_model = defaultModel || null;
@@ -253,13 +254,17 @@ function ProjectForm({
     },
     onSuccess: async () => {
       const savePath = project!.path;
-      try {
-        if (claudeMd !== initialClaudeMd) await api.files.write(`${savePath}/CLAUDE.md`, claudeMd);
-        if (agentsMd !== initialAgentsMd) await api.files.write(`${savePath}/AGENTS.md`, agentsMd);
-        if (settingsJson !== initialSettingsJson)
-          await api.files.write(`${savePath}/.claude/settings.json`, settingsJson);
-      } catch {
-        // best-effort file writes
+      // Skip config-file writes when the path changed: the loaded content came
+      // from the old folder, so writing it to the new one could clobber real files.
+      if (path.trim() === project!.path) {
+        try {
+          if (claudeMd !== initialClaudeMd) await api.files.write(`${savePath}/CLAUDE.md`, claudeMd);
+          if (agentsMd !== initialAgentsMd) await api.files.write(`${savePath}/AGENTS.md`, agentsMd);
+          if (settingsJson !== initialSettingsJson)
+            await api.files.write(`${savePath}/.claude/settings.json`, settingsJson);
+        } catch {
+          // best-effort file writes
+        }
       }
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       onSubmit();
@@ -275,7 +280,7 @@ function ProjectForm({
 
   const handleFolderSelect = (selectedPath: string, folderName: string) => {
     setPath(selectedPath);
-    if (!name || name === prevFolderName(path)) setName(folderName);
+    if (mode === 'add' && (!name || name === prevFolderName(path))) setName(folderName);
     setShowBrowser(false);
   };
 
@@ -343,56 +348,47 @@ function ProjectForm({
           style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border)' }}
         >
           <div className="flex flex-col gap-4">
-            {/* Folder Path — add mode only */}
-            {mode === 'add' && (
-              <div>
-                <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>Folder Path</label>
-                <div className="flex gap-2">
-                  <input
-                    value={path}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      const folderName = prevFolderName(val);
-                      setPath(val);
-                      if (!name || name === prevFolderName(path)) setName(folderName);
-                    }}
-                    placeholder="/home/user/projects/myapp"
-                    className="flex-1 px-4 py-2.5 rounded-lg border text-sm outline-none font-mono"
-                    style={inputStyle}
-                  />
-                  <button
-                    onClick={() => setShowBrowser(!showBrowser)}
-                    className="px-3 py-2.5 rounded-lg border text-sm flex items-center gap-1.5"
-                    style={{
-                      background: showBrowser ? 'var(--accent)' : 'var(--bg-tertiary)',
-                      borderColor: 'var(--border)',
-                      color: showBrowser ? 'white' : 'var(--text-secondary)',
-                    }}
-                  >
-                    <FolderOpen className="w-4 h-4" />
-                    Browse
-                  </button>
-                </div>
+            {/* Folder Path — editable in both add and edit mode */}
+            <div>
+              <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>{mode === 'add' ? 'Folder Path' : 'Path'}</label>
+              <div className="flex gap-2">
+                <input
+                  value={path}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setPath(val);
+                    if (mode === 'add' && (!name || name === prevFolderName(path))) {
+                      setName(prevFolderName(val));
+                    }
+                  }}
+                  placeholder="/home/user/projects/myapp"
+                  className="flex-1 px-4 py-2.5 rounded-lg border text-sm outline-none font-mono"
+                  style={inputStyle}
+                />
+                <button
+                  onClick={() => setShowBrowser(!showBrowser)}
+                  className="px-3 py-2.5 rounded-lg border text-sm flex items-center gap-1.5"
+                  style={{
+                    background: showBrowser ? 'var(--accent)' : 'var(--bg-tertiary)',
+                    borderColor: 'var(--border)',
+                    color: showBrowser ? 'white' : 'var(--text-secondary)',
+                  }}
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  Browse
+                </button>
               </div>
-            )}
+              {mode === 'edit' && path.trim() !== project!.path && (
+                <p className="text-xs mt-1" style={{ color: 'var(--warning, #d97706)' }}>
+                  Le sessioni esistenti restano associate al progetto; le nuove partiranno dalla nuova cartella. CLAUDE.md/AGENTS.md/settings non vengono scritti quando cambi il path.
+                </p>
+              )}
+            </div>
 
             {/* Folder Browser */}
-            {mode === 'add' && showBrowser && (
+            {showBrowser && (
               <div>
                 <FolderBrowser onSelect={handleFolderSelect} />
-              </div>
-            )}
-
-            {/* Edit mode: show path as read-only */}
-            {mode === 'edit' && (
-              <div>
-                <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>Path</label>
-                <div
-                  className="px-4 py-2.5 rounded-lg border text-sm font-mono"
-                  style={{ background: 'var(--bg-primary)', borderColor: 'var(--border)', color: 'var(--text-secondary)' }}
-                >
-                  {project!.path}
-                </div>
               </div>
             )}
 
