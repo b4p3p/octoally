@@ -116,6 +116,11 @@ interface ActiveSession {
   subscribers: Set<WebSocket>;
   seq: number; // monotonic counter for pty_output rows
   cols: number; // last known terminal column width
+  rows: number; // last known terminal row height
+  /** The single connection allowed to resize the PTY (geometry owner).
+   *  null = nobody is controlling; the PTY keeps DEFAULT_GEOMETRY and every
+   *  client is a viewer that scales the render locally. See terminal.ts. */
+  controller: WebSocket | null;
   task: string; // 'Terminal' for plain shells, task description for session
   cliType?: 'claude' | 'codex'; // CLI type — Codex needs special capture handling
   externalSocket?: string; // external dtach socket (adopted sessions)
@@ -123,6 +128,11 @@ interface ActiveSession {
   replayBytes: number;     // total bytes in replayBuffer
   wsPendingData: string | null; // batched WS output waiting to be sent
 }
+
+/** Default PTY geometry, owned by the server (not by any client). The PTY is
+ *  created at this size and returns to it when no client holds the controller.
+ *  A client may temporarily override it via `claim-control` (see terminal.ts). */
+export const DEFAULT_GEOMETRY = { cols: 140, rows: 40 };
 
 const activeSessions = new Map<string, ActiveSession>();
 
@@ -597,7 +607,9 @@ function wireWorker(sessionId: string, worker: ChildProcess, projectPath?: strin
     worker,
     subscribers: new Set(),
     seq: startSeq,
-    cols: 120,
+    cols: DEFAULT_GEOMETRY.cols,
+    rows: DEFAULT_GEOMETRY.rows,
+    controller: null,
     task: '',  // set by caller (spawnSession/spawnTerminal/reconnectSession)
     replayBuffer: [],
     replayBytes: 0,
@@ -1150,6 +1162,7 @@ export function attachTerminal(sessionId: string, ws: WebSocket, options?: { ski
     active.subscribers.add(ws);
     ws.on('close', () => {
       active.subscribers.delete(ws);
+      releaseControl(sessionId, ws); // no-op unless ws was the controller
     });
   }
 
@@ -1313,6 +1326,7 @@ export function resizeSession(sessionId: string, cols: number, rows: number): bo
   active.worker.send({ type: 'resize', cols, rows });
 
   active.cols = cols;
+  active.rows = rows;
 
   // Store resize event in the PTY output stream
   active.seq++;
@@ -1324,6 +1338,52 @@ export function resizeSession(sessionId: string, cols: number, rows: number): bo
     db.prepare('UPDATE sessions SET terminal_cols = ? WHERE id = ?').run(cols, sessionId);
   } catch {}
   return true;
+}
+
+/** Geometry currently applied to the PTY (what viewers should size xterm to). */
+export function getGeometry(sessionId: string): { cols: number; rows: number } {
+  const active = activeSessions.get(sessionId);
+  if (active) return { cols: active.cols, rows: active.rows };
+  return { ...DEFAULT_GEOMETRY };
+}
+
+/** Tell every subscriber the current geometry so viewers size their xterm to
+ *  the PTY and scale the render locally (no client ever resizes as a viewer). */
+export function broadcastGeometry(sessionId: string): void {
+  const active = activeSessions.get(sessionId);
+  if (!active) return;
+  const msg = JSON.stringify({ type: 'geometry-changed', cols: active.cols, rows: active.rows });
+  for (const ws of active.subscribers) {
+    try { ws.send(msg); } catch { /* ignore */ }
+  }
+}
+
+/** True if `ws` currently owns geometry control for the session. */
+export function isController(sessionId: string, ws: WebSocket): boolean {
+  const active = activeSessions.get(sessionId);
+  return !!active && active.controller === ws;
+}
+
+/** A client takes geometry control: it becomes the sole connection allowed to
+ *  resize the PTY, and the PTY adopts its requested size. */
+export function claimControl(sessionId: string, ws: WebSocket, cols: number, rows: number): boolean {
+  const active = activeSessions.get(sessionId);
+  if (!active) return false;
+  active.controller = ws;
+  resizeSession(sessionId, cols, rows);
+  broadcastGeometry(sessionId);
+  return true;
+}
+
+/** A client releases geometry control (explicitly or on disconnect). The PTY
+ *  returns to DEFAULT_GEOMETRY so no disconnected client keeps imposing a size.
+ *  No-op if `ws` wasn't the controller. */
+export function releaseControl(sessionId: string, ws: WebSocket): void {
+  const active = activeSessions.get(sessionId);
+  if (!active || active.controller !== ws) return;
+  active.controller = null;
+  resizeSession(sessionId, DEFAULT_GEOMETRY.cols, DEFAULT_GEOMETRY.rows);
+  broadcastGeometry(sessionId);
 }
 
 export function getSessionCols(sessionId: string): number {
