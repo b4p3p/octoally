@@ -5,7 +5,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { RotateCcw, ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
+import { RotateCcw, ExternalLink, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import { useSpeechStore } from '../lib/speech';
 import { isKeyboardNavActive } from '../lib/shortcuts';
 import { api } from '../lib/api';
@@ -109,8 +109,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   passiveResizeRef.current = passiveResize;
   const hideCursorRef = useRef(hideCursor);
   hideCursorRef.current = hideCursor;
-  const isControllerRef = useRef(isController);
-  isControllerRef.current = isController;
+  // Geometry controller is an opt-in toggle (default: viewer). When active, this
+  // terminal claims control and fits the PTY to its own size; otherwise it scales.
+  const [controllerActive, setControllerActive] = useState(isController);
+  const isControllerRef = useRef(controllerActive);
+  isControllerRef.current = controllerActive;
   const applyScaleRef = useRef<(() => void) | null>(null);
   const cliTypeRef = useRef(cliType);
   cliTypeRef.current = cliType;
@@ -620,14 +623,17 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     const w = wsRef.current;
     const term = termRef.current;
     if (!w || w.readyState !== WebSocket.OPEN || !term) return;
-    if (isController) {
+    if (controllerActive) {
+      // Clear the viewer CSS scale first so FitAddon measures the real container.
+      const xtermEl = containerRef.current?.querySelector('.xterm') as HTMLElement | null;
+      if (xtermEl) { xtermEl.style.transform = ''; xtermEl.style.transformOrigin = ''; }
       fitRef.current?.fit();
       w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
     } else {
       w.send(JSON.stringify({ type: 'release-control' }));
       applyScaleRef.current?.();
     }
-  }, [isController]);
+  }, [controllerActive]);
 
   // Live-apply per-client terminal font size changes (emitted by SettingsModal).
   useEffect(() => {
@@ -874,14 +880,27 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         {connected && !suspended && (
           <>
             <button
+              onClick={() => setControllerActive((v) => !v)}
+              className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
+              style={controllerActive
+                ? { background: 'var(--accent)', color: 'white' }
+                : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+              title={controllerActive
+                ? 'Rilascia il controllo della dimensione (torna a viewer scalato)'
+                : 'Adatta la dimensione del terminale alla mia finestra (prendi il controllo)'}
+            >
+              <Maximize2 className="w-3 h-3" />
+            </button>
+            <button
               onClick={() => {
                 const term = termRef.current;
                 const fit = fitRef.current;
                 const w = wsRef.current;
                 if (!term) return;
                 const current = term.options.fontSize || 13;
-                if (current > 6) {
-                  term.options.fontSize = current - 1;
+                if (current <= 6) return;
+                term.options.fontSize = current - 1;
+                if (isControllerRef.current) {
                   fit?.fit();
                   if (w && w.readyState === WebSocket.OPEN) {
                     w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -891,6 +910,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                       setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })), 50);
                     }, 50);
                   }
+                } else {
+                  // Viewer: font is local-only; rescale the render, never resize PTY.
+                  applyScaleRef.current?.();
                 }
               }}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
@@ -906,8 +928,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                 const w = wsRef.current;
                 if (!term) return;
                 const current = term.options.fontSize || 13;
-                if (current < 32) {
-                  term.options.fontSize = current + 1;
+                if (current >= 32) return;
+                term.options.fontSize = current + 1;
+                if (isControllerRef.current) {
                   fit?.fit();
                   if (w && w.readyState === WebSocket.OPEN) {
                     w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -916,6 +939,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                       setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })), 50);
                     }, 50);
                   }
+                } else {
+                  applyScaleRef.current?.();
                 }
               }}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
