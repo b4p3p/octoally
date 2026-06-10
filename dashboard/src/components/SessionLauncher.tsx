@@ -577,7 +577,7 @@ export function TaskModal({
                     </div>
                     <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
                       {inheritMcp
-                        ? 'Launches as full session with agent persona in the prompt — all your MCP servers available (chrome-devtools, docs-search, …). Trades native --agent tool scoping for MCP access.'
+                        ? 'Launches as full session with agent persona in the prompt — all your MCP servers available (chrome-devtools, …). Trades native --agent tool scoping for MCP access.'
                         : 'Uses native --agent flag. Strict tool scope from the agent\'s .md file — MCP tools NOT available unless explicitly declared there.'}
                     </div>
                   </div>
