@@ -22,6 +22,11 @@ if [ ! -d "$INSTALL_DIR" ]; then
   exit 1
 fi
 
+# 0. Ensure system runtime deps (tmux/dtach/build tools) so the dev install
+#    matches what install.sh gives an end-user. Idempotent.
+log_info "Checking system runtime dependencies..."
+bash "$SRC_DIR/scripts/ensure-runtime-deps.sh"
+
 # 1. Stop running server
 log_info "Stopping server..."
 fuser -k 42010/tcp >/dev/null 2>&1 || true
