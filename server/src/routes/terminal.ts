@@ -3,7 +3,16 @@ import {
   attachTerminal, writeToSession, resizeSession, reconnectSession,
   getPendingSpawn, consumePendingSpawn, spawnSession, spawnTerminal, spawnAdopt, spawnAgent,
   sendReplay,
+  claimControl, releaseControl, isController, getGeometry, broadcastGeometry,
+  DEFAULT_GEOMETRY,
 } from '../services/session-manager.js';
+
+/** Send the current PTY geometry to a freshly attached socket so it can size
+ *  xterm to the PTY and scale the render locally. */
+function sendGeometry(sessionId: string, socket: { send: (s: string) => void }): void {
+  const g = getGeometry(sessionId);
+  try { socket.send(JSON.stringify({ type: 'geometry-changed', cols: g.cols, rows: g.rows })); } catch { /* ignore */ }
+}
 import { getDb } from '../db/index.js';
 
 /**
@@ -53,19 +62,26 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
 
             spawned = true;
             try {
+              // The PTY is owned by the server at DEFAULT_GEOMETRY; the first
+              // client's dimensions only trigger the spawn, they don't set the
+              // size. Clients are viewers that scale locally until one claims
+              // control. (adopt keeps the dtach pane's own size.)
+              const gc = DEFAULT_GEOMETRY.cols, gr = DEFAULT_GEOMETRY.rows;
               if (info.mode === 'adopt' && info.socketPath) {
                 await spawnAdopt(sessionId, info.socketPath, info.projectPath, info.task, msg.cols, msg.rows);
               } else if (info.mode === 'terminal') {
-                await spawnTerminal(sessionId, info.projectPath, msg.cols, msg.rows);
+                await spawnTerminal(sessionId, info.projectPath, gc, gr);
               } else if (info.mode === 'agent' && info.agentType) {
-                await spawnAgent(sessionId, info.projectPath, info.task, info.agentType, msg.cols, msg.rows, info.cliType, info.model, info.inheritMcp);
+                await spawnAgent(sessionId, info.projectPath, info.task, info.agentType, gc, gr, info.cliType, info.model, info.inheritMcp);
               } else {
-                await spawnSession(sessionId, info.projectPath, info.task, msg.cols, msg.rows, info.cliType, info.model);
+                await spawnSession(sessionId, info.projectPath, info.task, gc, gr, info.cliType, info.model);
               }
               const attached = attachTerminal(sessionId, socket);
               if (!attached) {
                 socket.send(JSON.stringify({ type: 'error', message: 'Failed to attach after spawn' }));
                 socket.close();
+              } else {
+                sendGeometry(sessionId, socket);
               }
             } catch (err: any) {
               socket.send(JSON.stringify({ type: 'error', message: `Spawn failed: ${err.message}` }));
@@ -133,6 +149,7 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
             }
           } catch { /* ignore */ }
         });
+        sendGeometry(sessionId, socket);
         socket.send(JSON.stringify({ type: 'connected', sessionId }));
         return;
       }
@@ -163,8 +180,21 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
               writeToSession(sessionId, msg.data, msg.paste);
               break;
 
+            case 'claim-control':
+              // This connection becomes the geometry owner; the PTY adopts its
+              // requested size and all viewers are told to re-scale.
+              claimControl(sessionId, socket, msg.cols, msg.rows);
+              break;
+
+            case 'release-control':
+              // Back to viewer; PTY returns to DEFAULT_GEOMETRY for everyone.
+              releaseControl(sessionId, socket);
+              break;
+
             case 'resize':
-              resizeSession(sessionId, msg.cols, msg.rows);
+              // Honored ONLY from the current controller — viewers never resize
+              // the shared PTY (this is what prevents cross-client garbage).
+              if (isController(sessionId, socket)) resizeSession(sessionId, msg.cols, msg.rows);
               break;
 
             case 'refresh':
@@ -180,6 +210,7 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
         }
       });
 
+      sendGeometry(sessionId, socket);
       socket.send(JSON.stringify({ type: 'connected', sessionId }));
     })().catch((err) => {
       console.error(`[WS] Error in terminal handler for ${sessionId}:`, err);

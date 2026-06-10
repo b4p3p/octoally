@@ -81,7 +81,13 @@ function Dashboard() {
     staleTime: 30_000,
   });
   useEffect(() => {
-    const size = appSettings?.settings?.app_font_size;
+    // app_font_size is a per-client display preference: prefer localStorage,
+    // seeding once from the shared DB value for backward compatibility.
+    let size = localStorage.getItem('octoally-app-font-size');
+    if (!size && appSettings?.settings?.app_font_size) {
+      size = appSettings.settings.app_font_size;
+      localStorage.setItem('octoally-app-font-size', size);
+    }
     if (size) {
       document.documentElement.style.setProperty('--app-font-size', `${size}px`);
     }

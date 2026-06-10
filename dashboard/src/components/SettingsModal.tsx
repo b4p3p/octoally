@@ -87,8 +87,8 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       setSessionCodexCmd(s.session_codex_command || '');
       setAgentClaudeCmd(s.agent_claude_command || '');
       setAgentCodexCmd(s.agent_codex_command || '');
-      setFontSize(s.terminal_font_size || '12');
-      setAppFontSize(s.app_font_size || '16');
+      setFontSize(localStorage.getItem('octoally-terminal-font-size') || s.terminal_font_size || '12');
+      setAppFontSize(localStorage.getItem('octoally-app-font-size') || s.app_font_size || '16');
       setServerPort(s.server_port || '42010');
       setDefaultModel(s.default_model || '');
       useShortcutStore.getState().hydrate(s.shortcut_bindings || null);
@@ -119,13 +119,17 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
   });
 
   function handleSave() {
+    // Font sizes are per-client display preferences: persist them locally and
+    // apply the app font immediately, instead of pushing them to the shared DB.
+    localStorage.setItem('octoally-app-font-size', appFontSize);
+    localStorage.setItem('octoally-terminal-font-size', fontSize);
+    document.documentElement.style.setProperty('--app-font-size', `${appFontSize}px`);
+    window.dispatchEvent(new CustomEvent('octoally-terminal-font-size', { detail: fontSize }));
     mutation.mutate({
       session_claude_command: sessionClaudeCmd,
       session_codex_command: sessionCodexCmd,
       agent_claude_command: agentClaudeCmd,
       agent_codex_command: agentCodexCmd,
-      terminal_font_size: fontSize,
-      app_font_size: appFontSize,
       server_port: serverPort,
       default_model: defaultModel,
       shortcut_bindings: useShortcutStore.getState().serialize(),
