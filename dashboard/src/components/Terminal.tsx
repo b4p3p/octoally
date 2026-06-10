@@ -50,6 +50,10 @@ interface TerminalProps {
    *  Grid/thumbnail views use this to avoid corrupting the PTY column width
    *  that the main terminal depends on. */
   passiveResize?: boolean;
+  /** When true, this terminal owns the PTY geometry: it fits to its own size and
+   *  sends resize/claim-control. When false (default) it's a viewer that scales
+   *  the render via CSS and never resizes the shared PTY. */
+  isController?: boolean;
   /** Hide the xterm.js cursor. Used for RuFlo sessions where the CLI renders its own cursor. */
   hideCursor?: boolean;
   /** CLI type — Codex sessions need capture-pane refresh on tab switch/resize */
@@ -59,7 +63,7 @@ interface TerminalProps {
   onPopOut?: () => void;
 }
 
-export function Terminal({ sessionId, visible = true, suspended = false, passiveResize = false, hideCursor = false, cliType, onExit, onReconnect, onPopOut }: TerminalProps) {
+export function Terminal({ sessionId, visible = true, suspended = false, passiveResize = false, isController = false, hideCursor = false, cliType, onExit, onReconnect, onPopOut }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -72,7 +76,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     queryFn: () => api.settings.get(),
     staleTime: 30_000,
   });
-  const configuredFontSize = Number(settingsData?.settings?.terminal_font_size) || 12;
+  // terminal_font_size is a per-client display preference: prefer localStorage,
+  // seeding from the shared DB value for backward compatibility.
+  const configuredFontSize = Number(localStorage.getItem('octoally-terminal-font-size') || settingsData?.settings?.terminal_font_size) || 12;
   const [showHistory, setShowHistory] = useState(false);
   const [popOutConfirm, setPopOutConfirm] = useState(false);
   const [popOutSkipChecked, setPopOutSkipChecked] = useState(false);
@@ -103,6 +109,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   passiveResizeRef.current = passiveResize;
   const hideCursorRef = useRef(hideCursor);
   hideCursorRef.current = hideCursor;
+  const isControllerRef = useRef(isController);
+  isControllerRef.current = isController;
+  const applyScaleRef = useRef<(() => void) | null>(null);
   const cliTypeRef = useRef(cliType);
   cliTypeRef.current = cliType;
   // Debounce timer for Codex capture-pane refreshes — prevents multiple
@@ -323,6 +332,29 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     let suspendedClose = false;
     // Set when doResize wanted to send but WS wasn't open yet
     let pendingResize = false;
+
+    // Scale the rendered terminal to fill the card WITHOUT changing the PTY
+    // geometry. Used by every viewer (any client that isn't the controller):
+    // xterm stays at the server-owned geometry, we only CSS-scale the pixels.
+    function applyScale() {
+      const container = containerRef.current;
+      const xtermEl = container?.querySelector('.xterm') as HTMLElement | null;
+      if (!container || !xtermEl) return;
+      if (isControllerRef.current) {
+        xtermEl.style.transform = '';
+        xtermEl.style.transformOrigin = '';
+        return;
+      }
+      xtermEl.style.transform = '';
+      const natW = xtermEl.offsetWidth;
+      const natH = xtermEl.offsetHeight;
+      if (!natW || !natH) return;
+      const scale = Math.min(container.clientWidth / natW, container.clientHeight / natH);
+      xtermEl.style.transformOrigin = 'top left';
+      xtermEl.style.transform = `scale(${scale > 0 ? scale : 1})`;
+    }
+    applyScaleRef.current = applyScale;
+
     function connectWs() {
       if (isSuspendedRef.current) return;
 
@@ -348,10 +380,19 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         pendingTerminals.delete(sessionId);
         notifyConnectionChange();
         reconnectAttempts = 0;
-        // If a resize was missed while WS was connecting, send it now.
+        // If a resize was missed while WS was connecting, send it now. This also
+        // triggers lazy-spawn of pending sessions; the server ignores its
+        // dimensions for geometry unless we're the controller.
         if (pendingResize) {
           pendingResize = false;
           ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        }
+        // Geometry controller claims control at its own size; viewers just scale.
+        if (isControllerRef.current) {
+          fitAddon.fit();
+          ws.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
+        } else {
+          applyScale();
         }
         term.focus();
         notifyServerAlive();
@@ -362,7 +403,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         // force-resize just corrupts the tmux pane history via lossy reflow.
         // SKIP for Codex: Codex TUI redraws accumulate in tmux scrollback,
         // causing capture-pane to show duplicate output.
-        if (!passiveResizeRef.current && hideCursorRef.current && cliTypeRef.current !== 'codex') {
+        // Only the controller may resize the shared PTY.
+        if (isControllerRef.current && hideCursorRef.current && cliTypeRef.current !== 'codex') {
           const cols = term.cols;
           const rows = term.rows;
           setTimeout(() => {
@@ -404,6 +446,14 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
             case 'error':
               term.write(`\r\n\x1b[31m[Error: ${msg.message}]\x1b[0m\r\n`);
               intentionalClose = true;
+              break;
+            case 'geometry-changed':
+              // The server owns the PTY geometry. Viewers size xterm to it and
+              // scale locally; the controller already drives the size itself.
+              if (!isControllerRef.current && (term.cols !== msg.cols || term.rows !== msg.rows)) {
+                term.resize(msg.cols, msg.rows);
+              }
+              applyScale();
               break;
           }
         } catch {
@@ -485,6 +535,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     let firstResize = true;
 
     function doResize() {
+      if (!isControllerRef.current) {
+        // Viewer: never resize the shared PTY — just rescale the render to the card.
+        applyScale();
+        return;
+      }
       fitAddon.fit();
       if (term.cols !== lastCols || term.rows !== lastRows) {
         lastCols = term.cols;
@@ -523,9 +578,18 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       if (entry && (entry.contentRect.width < 10 || entry.contentRect.height < 10)) return;
 
       if (firstResize) {
-        // Send first resize immediately (triggers server replay + spawn)
         firstResize = false;
-        doResize();
+        // Always send one initial resize: it triggers lazy-spawn of pending
+        // sessions. The server ignores the dimensions for geometry unless we're
+        // the controller. After that, viewers only scale.
+        if (isControllerRef.current) fitAddon.fit();
+        const w = wsRef.current;
+        if (w && w.readyState === WebSocket.OPEN) {
+          w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        } else {
+          pendingResize = true;
+        }
+        applyScale();
         return;
       }
 
@@ -550,6 +614,34 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       term.dispose();
     };
   }, [sessionId, onExit]);
+
+  // React to the controller toggling: claim or release geometry control live.
+  useEffect(() => {
+    const w = wsRef.current;
+    const term = termRef.current;
+    if (!w || w.readyState !== WebSocket.OPEN || !term) return;
+    if (isController) {
+      fitRef.current?.fit();
+      w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
+    } else {
+      w.send(JSON.stringify({ type: 'release-control' }));
+      applyScaleRef.current?.();
+    }
+  }, [isController]);
+
+  // Live-apply per-client terminal font size changes (emitted by SettingsModal).
+  useEffect(() => {
+    const onFont = (e: Event) => {
+      const size = Number((e as CustomEvent).detail);
+      const term = termRef.current;
+      if (!term || !size) return;
+      term.options.fontSize = size;
+      fitRef.current?.fit();
+      applyScaleRef.current?.();
+    };
+    window.addEventListener('octoally-terminal-font-size', onFont);
+    return () => window.removeEventListener('octoally-terminal-font-size', onFont);
+  }, []);
 
   // Suspension effect: disconnect WebSocket when suspended, reconnect when resumed.
   // This ensures only one Terminal connects to a given session at a time.
