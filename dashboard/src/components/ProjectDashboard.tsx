@@ -1462,13 +1462,25 @@ export function ProjectDashboard({ onOpenProject, active = true, onSelectedProje
     queryFn: () => api.settings.get(),
     staleTime: 60_000,
   });
+  // The status bar is a global resource (~/.claude). Gate the prompt on its
+  // real install state, not just the per-DB flag, so it never asks to install
+  // something that's already there (e.g. on a fresh dev database).
+  const { data: statuslineData } = useQuery({
+    queryKey: ['statusline'],
+    queryFn: () => api.settings.statusline.get(),
+    staleTime: 60_000,
+  });
   const [showStatuslinePrompt, setShowStatuslinePrompt] = useState(false);
 
   useEffect(() => {
-    if (settingsData?.settings?.statusline_prompted === 'false' && !showDeprecationModal) {
+    if (
+      settingsData?.settings?.statusline_prompted === 'false' &&
+      statuslineData?.installed === false &&
+      !showDeprecationModal
+    ) {
       setShowStatuslinePrompt(true);
     }
-  }, [settingsData, showDeprecationModal]);
+  }, [settingsData, statuslineData, showDeprecationModal]);
 
   // Uninstall ruflo from a single project
   const [uninstallingId, setUninstallingId] = useState<string | null>(null);

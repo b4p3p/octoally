@@ -22,6 +22,40 @@ const DEFAULTS: Record<string, string> = {
   shortcut_bindings: '{}',         // JSON: { [actionId]: { combo, fireInEditable } }
 };
 
+const STATUSLINE_SCRIPT = 'octoally-statusline.sh';
+const STATUSLINE_MARKER = '// octoally-managed-statusline';
+
+function getGlobalSettingsPath(): string {
+  return join(homedir(), '.claude', 'settings.json');
+}
+
+function getStatuslineScriptPath(): string {
+  return join(homedir(), '.claude', STATUSLINE_SCRIPT);
+}
+
+function readGlobalSettings(): Record<string, any> {
+  const p = getGlobalSettingsPath();
+  if (!existsSync(p)) return {};
+  try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return {}; }
+}
+
+function writeGlobalSettings(settings: Record<string, any>): void {
+  const p = getGlobalSettingsPath();
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+}
+
+/** The statusline lives globally in ~/.claude, shared by every OctoAlly
+ *  instance (and Claude Code itself). Its real presence — not the per-DB
+ *  `statusline_prompted` flag — is the source of truth for "is it set up?". */
+function isStatuslineInstalled(): boolean {
+  const settings = readGlobalSettings();
+  return !!(
+    settings.statusLine?.command?.includes(STATUSLINE_SCRIPT) &&
+    existsSync(getStatuslineScriptPath())
+  );
+}
+
 export function getSetting(key: string): string {
   const db = getDb();
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
@@ -37,6 +71,10 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     for (const row of rows) {
       settings[row.key] = row.value;
     }
+    // The statusline is a global resource (~/.claude). If it's already
+    // installed, never report the install prompt as pending — regardless of
+    // the per-DB flag, which would otherwise re-fire on a fresh database.
+    if (isStatuslineInstalled()) settings.statusline_prompted = 'true';
     return { settings };
   });
 
@@ -67,38 +105,9 @@ export const settingsRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, settings: current };
   });
 
-  const STATUSLINE_SCRIPT = 'octoally-statusline.sh';
-  const STATUSLINE_MARKER = '// octoally-managed-statusline';
-
-  function getGlobalSettingsPath(): string {
-    return join(homedir(), '.claude', 'settings.json');
-  }
-
-  function getStatuslineScriptPath(): string {
-    return join(homedir(), '.claude', STATUSLINE_SCRIPT);
-  }
-
-  function readGlobalSettings(): Record<string, any> {
-    const p = getGlobalSettingsPath();
-    if (!existsSync(p)) return {};
-    try { return JSON.parse(readFileSync(p, 'utf-8')); } catch { return {}; }
-  }
-
-  function writeGlobalSettings(settings: Record<string, any>): void {
-    const p = getGlobalSettingsPath();
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
-  }
-
   // Check if OctoAlly statusline is installed
   app.get('/settings/statusline', async () => {
-    const settings = readGlobalSettings();
-    const scriptPath = getStatuslineScriptPath();
-    const installed = !!(
-      settings.statusLine?.command?.includes(STATUSLINE_SCRIPT) &&
-      existsSync(scriptPath)
-    );
-    return { installed };
+    return { installed: isStatuslineInstalled() };
   });
 
   // Install OctoAlly statusline to global ~/.claude/settings.json
