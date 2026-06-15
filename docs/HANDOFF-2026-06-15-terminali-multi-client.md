@@ -89,8 +89,10 @@ In ordine, ognuno scoperto **misurando il DOM reale** (non a intuito):
 
 4. **Zoom +/- non faceva nulla** (viewer fit-to-card compensava il font)
    → con il fit, cambiare il font è ininfluente.
-   → Decisione: lo zoom **vero** (reflow) vive nel controller. Nel viewer lo
-   zoom è locale (o assente). *(Vedi punto aperto sotto.)*
+   → Soluzione: lo zoom **vero** (reflow del PTY) vive nel **controller** (vista
+   piena/espansa); nel **viewer** lo zoom è un **magnify CSS locale per-client**
+   (`viewerZoomRef`, moltiplicatore sopra il fit) — non tocca il PTY, quindi non
+   cambia nulla per gli altri client. (Vedi sezione 7.)
 
 5. **Barrato / righe sovrapposte SOLO nel browser**
    → renderer **WebGL** di xterm a **devicePixelRatio frazionario** (scala
@@ -153,11 +155,12 @@ In ordine, ognuno scoperto **misurando il DOM reale** (non a intuito):
 
 ## 7. Punti aperti / possibili miglioramenti
 
-- **Zoom locale per-client nella griglia** (CSS, non condiviso): oggi lo zoom
-  in griglia "prende il controllo" → ridimensiona il PTY condiviso → cambia su
-  **tutti** i client. Per il multi-client sarebbe meglio uno zoom **locale**
-  (ingrandimento CSS della sola vista del client). Con il renderer DOM ora è
-  fattibile pulito. È il prossimo ritocco naturale.
+- ~~Zoom locale per-client nella griglia~~ — **FATTO**: lo zoom +/- in griglia è
+  un magnify CSS locale (`viewerZoomRef`, moltiplicatore sopra il fit). Non tocca
+  il PTY → gli altri client non cambiano. Default = fit (tutto visibile);
+  ingrandendo oltre la card si sborda dall'angolo alto-sinistra (per "tutto
+  grande e visibile" si usa la vista a tutto schermo, con reflow vero). Verificato
+  in dev: lo scale cambia, il pane PTY resta invariato.
 - **Cursore nel browser**: per le sessioni Claude il cursore di xterm è nascosto
   (lo disegna Claude); si vede nel terminale **attivo/focalizzato**. Nella
   griglia (vista passiva scalata) il caret non è attivo. Per scrivere nel

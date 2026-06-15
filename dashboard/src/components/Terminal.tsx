@@ -112,10 +112,17 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   hideCursorRef.current = hideCursor;
   // Geometry controller is an opt-in toggle (default: viewer). When active, this
   // terminal claims control and fits the PTY to its own size; otherwise it scales.
-  const [controllerActive, setControllerActive] = useState(isController);
+  // isController is fixed per call-site (grid = viewer, full/expanded = controller),
+  // so this never toggles at runtime — we only read the value.
+  const [controllerActive] = useState(isController);
   const isControllerRef = useRef(controllerActive);
   isControllerRef.current = controllerActive;
   const applyScaleRef = useRef<(() => void) | null>(null);
+  // Per-client LOCAL zoom for viewers: a CSS magnify multiplier applied on top
+  // of the fit-to-card scale. Only affects THIS client's view — never the shared
+  // PTY — so zooming a grid card on one client doesn't change anything for the
+  // others. 1 = whole terminal visible (fit); >1 = magnified; <1 = smaller.
+  const viewerZoomRef = useRef(1);
   const cliTypeRef = useRef(cliType);
   cliTypeRef.current = cliType;
   // Debounce timer for Codex capture-pane refreshes — prevents multiple
@@ -372,7 +379,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       if (!natW || !natH) return;
       xtermEl.style.width = `${natW}px`;
       xtermEl.style.height = `${natH}px`;
-      const scale = Math.min(container.clientWidth / natW, container.clientHeight / natH);
+      const fitScale = Math.min(container.clientWidth / natW, container.clientHeight / natH);
+      // Apply the per-client local zoom multiplier on top of fit (see viewerZoomRef).
+      const scale = (fitScale > 0 ? fitScale : 1) * viewerZoomRef.current;
       xtermEl.style.transformOrigin = 'top left';
       xtermEl.style.transform = `scale(${scale > 0 ? scale : 1})`;
     }
@@ -951,12 +960,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                 const fit = fitRef.current;
                 const w = wsRef.current;
                 if (!term) return;
-                const current = term.options.fontSize || 13;
-                if (current <= 6) return;
-                term.options.fontSize = current - 1;
                 if (isControllerRef.current) {
-                  // Controller: refit at the new font and resize the PTY so the
-                  // program reflows (text wraps to the card; vertical scroll).
+                  // Controller: change font, refit, resize the PTY → real reflow.
+                  const current = term.options.fontSize || 13;
+                  if (current <= 6) return;
+                  term.options.fontSize = current - 1;
                   fit?.fit();
                   if (w && w.readyState === WebSocket.OPEN) {
                     w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -967,11 +975,10 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                     }, 50);
                   }
                 } else {
-                  // Viewer: a TUI only reflows if its PTY is resized, so zooming
-                  // claims control. The controllerActive effect then fits at the
-                  // new font and resizes the PTY → real reflow + native scroll,
-                  // not a blurry CSS magnify. Releasing control restores the view.
-                  setControllerActive(true);
+                  // Viewer: LOCAL CSS magnify only — never touches the font or the
+                  // shared PTY, so other clients are unaffected.
+                  viewerZoomRef.current = Math.max(0.3, viewerZoomRef.current / 1.15);
+                  applyScaleRef.current?.();
                 }
               }}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
@@ -986,12 +993,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                 const fit = fitRef.current;
                 const w = wsRef.current;
                 if (!term) return;
-                const current = term.options.fontSize || 13;
-                if (current >= 32) return;
-                term.options.fontSize = current + 1;
                 if (isControllerRef.current) {
-                  // Controller: refit at the new font and resize the PTY so the
-                  // program reflows (text wraps to the card; vertical scroll).
+                  // Controller: change font, refit, resize the PTY → real reflow.
+                  const current = term.options.fontSize || 13;
+                  if (current >= 32) return;
+                  term.options.fontSize = current + 1;
                   fit?.fit();
                   if (w && w.readyState === WebSocket.OPEN) {
                     w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -1001,9 +1007,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                     }, 50);
                   }
                 } else {
-                  // Viewer: a TUI only reflows if its PTY is resized, so zooming
-                  // claims control → real reflow + native scroll (see Zoom out).
-                  setControllerActive(true);
+                  // Viewer: LOCAL CSS magnify only — see Zoom out.
+                  viewerZoomRef.current = Math.min(8, viewerZoomRef.current * 1.15);
+                  applyScaleRef.current?.();
                 }
               }}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
