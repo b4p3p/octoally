@@ -11,6 +11,11 @@ import { api } from '../lib/api';
 import { HistoryViewer } from './HistoryViewer';
 import '@xterm/xterm/css/xterm.css';
 
+// Readable floor for viewer (grid/secondary) terminals: a passive viewer never
+// reflows the shared PTY, so to stay legible it scales the render but NEVER below
+// this rendered font size — past that it crops and lets the user pan. (See applyScale.)
+const MIN_READABLE_FONT_PX = 12;
+
 const POPOUT_SKIP_KEY = 'octoally-popout-confirm-skip';
 function shouldSkipPopOutConfirm(): boolean {
   try { return localStorage.getItem(POPOUT_SKIP_KEY) === 'true'; } catch { return false; }
@@ -356,6 +361,29 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     // Scale the rendered terminal to fill the card WITHOUT changing the PTY
     // geometry. Used by every viewer (any client that isn't the controller):
     // xterm stays at the server-owned geometry, we only CSS-scale the pixels.
+    // Flow spacer that gives the scroll container the correct pan extent. A CSS
+    // transform scales the PIXELS but NOT the layout box, so without a spacer the
+    // container would scroll to the UN-scaled size (you'd scroll into empty
+    // space). The spacer sits in normal flow at the SCALED size and defines the
+    // pan extent; .xterm is taken out of flow (absolute) and painted on top.
+    function getSizer(container: HTMLElement): HTMLElement {
+      let sizer = container.querySelector(':scope > [data-viewer-sizer]') as HTMLElement | null;
+      if (!sizer) {
+        sizer = document.createElement('div');
+        sizer.setAttribute('data-viewer-sizer', '');
+        sizer.style.pointerEvents = 'none';
+        container.insertBefore(sizer, container.firstChild);
+      }
+      return sizer;
+    }
+
+    // Scale the rendered terminal for a viewer (any client that isn't the
+    // controller). The PTY geometry is NEVER touched — we only scale the pixels
+    // and let the user pan. The scale obeys a readable floor: never shrink the
+    // font below MIN_READABLE_FONT_PX, and never magnify past native. If the
+    // whole terminal fits while still readable, show all of it; otherwise clamp
+    // to the floor and crop, anchored bottom-left (input / latest output), with
+    // pan for the rest. The per-client manual zoom (viewerZoomRef) multiplies on top.
     function applyScale() {
       const container = containerRef.current;
       const xtermEl = container?.querySelector('.xterm') as HTMLElement | null;
@@ -364,27 +392,49 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         // Controller drives its own size — no scaling; let xterm own its layout.
         xtermEl.style.transform = '';
         xtermEl.style.transformOrigin = '';
+        xtermEl.style.position = '';
+        xtermEl.style.top = '';
+        xtermEl.style.left = '';
         xtermEl.style.width = '';
         xtermEl.style.height = '';
+        container.style.overflow = '';
+        container.style.position = '';
+        container.querySelector(':scope > [data-viewer-sizer]')?.remove();
         return;
       }
+      // Measure the natural content (.xterm-screen = cols×rows in px). Reset only
+      // the transform — NOT the pinned layout box — so the reading is unscaled.
       xtermEl.style.transform = '';
-      // Measure the ACTUAL terminal content (.xterm-screen = cols×rows in px).
-      // .xterm itself is constrained to the container, so we must (a) read the
-      // natural size from .xterm-screen and (b) FORCE .xterm to that natural
-      // size before scaling — otherwise the scaled .xterm box (and its
-      // viewport/scrollbar) lands mid-card while the content overflows it.
       const screenEl = xtermEl.querySelector('.xterm-screen') as HTMLElement | null;
       const natW = screenEl?.offsetWidth || xtermEl.offsetWidth;
       const natH = screenEl?.offsetHeight || xtermEl.offsetHeight;
       if (!natW || !natH) return;
+      const cw = container.clientWidth;
+      const ch = container.clientHeight;
+      const fitScale = Math.min(cw / natW, ch / natH);
+      const fontSize = term.options.fontSize || 14;
+      const minReadable = MIN_READABLE_FONT_PX / fontSize;
+      const autoScale = Math.min(1, Math.max(fitScale, minReadable));
+      const scale = (autoScale > 0 ? autoScale : 1) * viewerZoomRef.current;
+      // Pin .xterm to its natural box, take it out of flow, scale the pixels.
+      xtermEl.style.position = 'absolute';
+      xtermEl.style.top = '0';
+      xtermEl.style.left = '0';
       xtermEl.style.width = `${natW}px`;
       xtermEl.style.height = `${natH}px`;
-      const fitScale = Math.min(container.clientWidth / natW, container.clientHeight / natH);
-      // Apply the per-client local zoom multiplier on top of fit (see viewerZoomRef).
-      const scale = (fitScale > 0 ? fitScale : 1) * viewerZoomRef.current;
       xtermEl.style.transformOrigin = 'top left';
       xtermEl.style.transform = `scale(${scale > 0 ? scale : 1})`;
+      // Spacer carries the scaled size so the container can pan to it.
+      const sizer = getSizer(container);
+      sizer.style.width = `${Math.round(natW * scale)}px`;
+      sizer.style.height = `${Math.round(natH * scale)}px`;
+      container.style.position = 'relative';
+      container.style.overflow = 'auto';
+      // Anchor bottom-left (input / most-recent output). applyScale only runs on
+      // relayout/resize/geometry/zoom — never on plain output — so this won't
+      // fight a user who has panned away during steady-state viewing.
+      container.scrollLeft = 0;
+      container.scrollTop = container.scrollHeight;
     }
     applyScaleRef.current = applyScale;
 
@@ -697,9 +747,24 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     const term = termRef.current;
     if (!w || w.readyState !== WebSocket.OPEN || !term) return;
     isControllerRef.current = true;
-    // Clear any viewer CSS scale so FitAddon measures the real container.
-    const xtermEl = containerRef.current?.querySelector('.xterm') as HTMLElement | null;
-    if (xtermEl) { xtermEl.style.transform = ''; xtermEl.style.transformOrigin = ''; xtermEl.style.width = ''; xtermEl.style.height = ''; }
+    // Clear any viewer CSS scale + pan scaffolding so FitAddon measures the real
+    // container (mirror of applyScale's controller branch).
+    const container = containerRef.current;
+    const xtermEl = container?.querySelector('.xterm') as HTMLElement | null;
+    if (xtermEl) {
+      xtermEl.style.transform = '';
+      xtermEl.style.transformOrigin = '';
+      xtermEl.style.position = '';
+      xtermEl.style.top = '';
+      xtermEl.style.left = '';
+      xtermEl.style.width = '';
+      xtermEl.style.height = '';
+    }
+    if (container) {
+      container.style.overflow = '';
+      container.style.position = '';
+      container.querySelector(':scope > [data-viewer-sizer]')?.remove();
+    }
     fitRef.current?.fit();
     w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
   }, [isController]);
