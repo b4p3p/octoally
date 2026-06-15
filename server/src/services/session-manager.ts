@@ -1369,6 +1369,12 @@ export function isController(sessionId: string, ws: WebSocket): boolean {
 export function claimControl(sessionId: string, ws: WebSocket, cols: number, rows: number): boolean {
   const active = activeSessions.get(sessionId);
   if (!active) return false;
+  // Demote the previous controller (if it's a different client) so it drops to
+  // viewer mode and stops fighting over the single shared geometry. This is what
+  // lets the same session be open full-screen on multiple clients at once.
+  if (active.controller && active.controller !== ws) {
+    try { active.controller.send(JSON.stringify({ type: 'control-lost' })); } catch { /* ignore */ }
+  }
   active.controller = ws;
   resizeSession(sessionId, cols, rows);
   broadcastGeometry(sessionId);

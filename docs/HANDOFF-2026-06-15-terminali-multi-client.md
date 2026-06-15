@@ -59,11 +59,21 @@ Nel componente `dashboard/src/components/Terminal.tsx` la prop chiave è
   fa cedere la grid-card). Tra client **diversi** invece convivono: uno guida
   (controller), gli altri scalano (viewer).
 
+- **Arbitraggio del controller (cross-client):** un solo controller per sessione
+  **tra tutti i client**. Una vista piena "vuole il controllo" e lo rivendica su
+  connessione / focus / click (`claimControl`). Quando un altro client rivendica,
+  il server manda `control-lost` al precedente controller, che si **declassa a
+  viewer** (`isControllerRef=false` → applica `geometry-changed` + scala). Così
+  la stessa sessione può stare a tutto schermo su browser **e** Electron senza
+  che le due viste si litighino: l'ultima che clicchi/apri guida, l'altra mostra
+  la stessa geometria scalata. `isController` (prop) = "vuole il controllo";
+  `isControllerRef` = "controlla davvero ora" (arbitrato dal server).
+
 Lato server (`server/src/routes/terminal.ts` + `services/session-manager.ts`):
 - geometria **server-owned**, `DEFAULT_GEOMETRY = 140×40` (orizzontale ~16:9).
 - `claim-control` / `release-control` / `resize` (resize onorato **solo** dal
   controller). `release` e la **chiusura del socket** riportano a
-  `DEFAULT_GEOMETRY`.
+  `DEFAULT_GEOMETRY`. `claimControl` manda `control-lost` al controller precedente.
 - Il ramo WebSocket **passivo** ora onora anch'esso claim-control/resize (serve
   per lo zoom delle sessioni Terminal/Codex).
 

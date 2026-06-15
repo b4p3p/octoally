@@ -110,13 +110,14 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   passiveResizeRef.current = passiveResize;
   const hideCursorRef = useRef(hideCursor);
   hideCursorRef.current = hideCursor;
-  // Geometry controller is an opt-in toggle (default: viewer). When active, this
-  // terminal claims control and fits the PTY to its own size; otherwise it scales.
-  // isController is fixed per call-site (grid = viewer, full/expanded = controller),
-  // so this never toggles at runtime — we only read the value.
-  const [controllerActive] = useState(isController);
-  const isControllerRef = useRef(controllerActive);
-  isControllerRef.current = controllerActive;
+  // "Wants control" = the `isController` prop (full/expanded view: yes; grid: no).
+  // "Effective controller" = isControllerRef: whether THIS client CURRENTLY drives
+  // the shared PTY. The server arbitrates — only ONE controller per session across
+  // all clients. A full view claims on connect/focus; if another client then
+  // claims, the server sends `control-lost` and we drop to viewer (scale + apply
+  // the controller's geometry). This is what lets the same session be open
+  // full-screen on browser AND Electron without the two fighting.
+  const isControllerRef = useRef(isController);
   const applyScaleRef = useRef<(() => void) | null>(null);
   // Per-client LOCAL zoom for viewers: a CSS magnify multiplier applied on top
   // of the fit-to-card scale. Only affects THIS client's view — never the shared
@@ -433,11 +434,14 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
           pendingResize = false;
           ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
         }
-        // Geometry controller claims control at its own size; viewers just scale.
-        if (isControllerRef.current) {
+        // A view that WANTS control (full/expanded) claims it on connect — the
+        // server arbitrates and demotes any previous controller. Viewers scale.
+        if (isController) {
+          isControllerRef.current = true;
           fitAddon.fit();
           ws.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
         } else {
+          isControllerRef.current = false;
           applyScale();
         }
         term.focus();
@@ -501,6 +505,14 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
               }
               // Defer: term.resize relayouts on the next frame; measuring now
               // would scale against the old size.
+              scheduleScale();
+              break;
+            case 'control-lost':
+              // Another client took geometry control of this shared session.
+              // Drop to viewer: stop driving and render the controller's geometry
+              // scaled to our container. The geometry-changed that follows the
+              // other client's claim resizes our xterm; we start scaling now.
+              isControllerRef.current = false;
               scheduleScale();
               break;
           }
@@ -676,22 +688,23 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     };
   }, [sessionId, onExit]);
 
-  // React to the controller toggling: claim or release geometry control live.
-  useEffect(() => {
+  // Claim geometry control for this client (a full/expanded view that "wants
+  // control"). The server makes us the sole controller and demotes any previous
+  // one (it gets `control-lost`). No-op for views that don't want control (grid).
+  const claimControl = useCallback(() => {
+    if (!isController) return;
     const w = wsRef.current;
     const term = termRef.current;
     if (!w || w.readyState !== WebSocket.OPEN || !term) return;
-    if (controllerActive) {
-      // Clear the viewer CSS scale first so FitAddon measures the real container.
-      const xtermEl = containerRef.current?.querySelector('.xterm') as HTMLElement | null;
-      if (xtermEl) { xtermEl.style.transform = ''; xtermEl.style.transformOrigin = ''; }
-      fitRef.current?.fit();
-      w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
-    } else {
-      w.send(JSON.stringify({ type: 'release-control' }));
-      applyScaleRef.current?.();
-    }
-  }, [controllerActive]);
+    isControllerRef.current = true;
+    // Clear any viewer CSS scale so FitAddon measures the real container.
+    const xtermEl = containerRef.current?.querySelector('.xterm') as HTMLElement | null;
+    if (xtermEl) { xtermEl.style.transform = ''; xtermEl.style.transformOrigin = ''; xtermEl.style.width = ''; xtermEl.style.height = ''; }
+    fitRef.current?.fit();
+    w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
+  }, [isController]);
+  const claimControlRef = useRef(claimControl);
+  claimControlRef.current = claimControl;
 
   // Live-apply per-client terminal font size changes (emitted by SettingsModal).
   useEffect(() => {
@@ -829,31 +842,26 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         const term = termRef.current;
         const w = wsRef.current;
         if (fit && term) {
-          // Viewer: never fit (would drift geometry); just rescale to the card.
-          if (isControllerRef.current) fit.fit();
-          else applyScaleRef.current?.();
-          if (w && w.readyState === WebSocket.OPEN) {
-            if (isControllerRef.current) {
-              // Re-assert geometry ownership on becoming visible (e.g. returning
-              // from an expanded modal that had taken control): claim-control
-              // makes this socket the controller AND resizes the PTY to our fit.
-              w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
-            } else if (!passiveResizeRef.current) {
-              w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-            }
-            // Codex: after resize, send capture-pane refresh for correct display.
-            // Raw replay chunks from different widths render garbled for Codex.
-            // Debounced so it doesn't stack with the suspension effect's refresh.
-            if (cliType === 'codex') {
-              if (codexRefreshTimer.current) clearTimeout(codexRefreshTimer.current);
-              codexRefreshTimer.current = setTimeout(() => {
-                codexRefreshTimer.current = null;
-                if (!cancelled && w.readyState === WebSocket.OPEN) {
-                  term.reset();
-                  w.send(JSON.stringify({ type: 'refresh' }));
-                }
-              }, 500);
-            }
+          if (isController) {
+            // Full/expanded view: re-claim control on becoming visible (switching
+            // back to this tab/client, or returning from an expanded modal). The
+            // server makes us the controller again and demotes whoever had it.
+            claimControlRef.current();
+          } else {
+            // Viewer: rescale to the card; never touch the shared PTY.
+            applyScaleRef.current?.();
+          }
+          // Codex: after a (re)claim, capture-pane refresh for correct display —
+          // raw replay chunks from different widths render garbled for Codex.
+          if (cliType === 'codex' && w && w.readyState === WebSocket.OPEN) {
+            if (codexRefreshTimer.current) clearTimeout(codexRefreshTimer.current);
+            codexRefreshTimer.current = setTimeout(() => {
+              codexRefreshTimer.current = null;
+              if (!cancelled && w.readyState === WebSocket.OPEN) {
+                term.reset();
+                w.send(JSON.stringify({ type: 'refresh' }));
+              }
+            }, 500);
           }
           term.scrollToBottom();
           if (!skipFocus) term.focus();
@@ -950,7 +958,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   }, [sessionId]);
 
   return (
-    <div className="h-full relative group/terminal" onClick={() => termRef.current?.focus()}>
+    <div className="h-full relative group/terminal" onClick={() => { termRef.current?.focus(); claimControlRef.current(); }}>
       <div className="absolute top-2 right-5 z-10 flex items-center gap-2">
         {connected && !suspended && (
           <>
