@@ -3,9 +3,8 @@ import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { WebglAddon } from '@xterm/addon-webgl';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { RotateCcw, ExternalLink, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
+import { RotateCcw, ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
 import { useSpeechStore } from '../lib/speech';
 import { isKeyboardNavActive } from '../lib/shortcuts';
 import { api } from '../lib/api';
@@ -50,9 +49,11 @@ interface TerminalProps {
    *  Grid/thumbnail views use this to avoid corrupting the PTY column width
    *  that the main terminal depends on. */
   passiveResize?: boolean;
-  /** When true, this terminal owns the PTY geometry: it fits to its own size and
-   *  sends resize/claim-control. When false (default) it's a viewer that scales
-   *  the render via CSS and never resizes the shared PTY. */
+  /** When true (default) this terminal is a real fit-to-container terminal: it
+   *  fits to its own size and drives the PTY geometry (resize/claim-control), so
+   *  the program reflows and the cursor stays aligned. Set false only for a
+   *  legacy CSS-scaled viewer (no longer used — scaling a terminal mis-aligns
+   *  rows/box-drawing/cursor; every view now drives its own PTY instead). */
   isController?: boolean;
   /** Hide the xterm.js cursor. Used for RuFlo sessions where the CLI renders its own cursor. */
   hideCursor?: boolean;
@@ -63,7 +64,7 @@ interface TerminalProps {
   onPopOut?: () => void;
 }
 
-export function Terminal({ sessionId, visible = true, suspended = false, passiveResize = false, isController = false, hideCursor = false, cliType, onExit, onReconnect, onPopOut }: TerminalProps) {
+export function Terminal({ sessionId, visible = true, suspended = false, passiveResize = false, isController = true, hideCursor = false, cliType, onExit, onReconnect, onPopOut }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -131,7 +132,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     if (!term) return;
     const fit = fitRef.current;
     const w = wsRef.current;
-    if (fit) fit.fit();
+    // Only the controller owns the geometry; a viewer fitting here would drift
+    // its xterm away from the server-owned PTY size (overlap/garbage).
+    if (fit && isControllerRef.current) fit.fit();
 
     if (!w || w.readyState !== WebSocket.OPEN) {
       // WebSocket not open — full reconnect, server will replay into clean buffer
@@ -154,16 +157,24 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     }
 
     if (hideCursorRef.current) {
-      // Claude session/agent: reset first to clear stacked renders, then
-      // SIGWINCH-toggle so Claude redraws into the now-clean buffer.
+      // Claude session/agent: reset first to clear stacked renders.
       term.reset();
-      const cols = term.cols;
-      const rows = term.rows;
-      w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
-      setTimeout(() => {
-        if (w.readyState !== WebSocket.OPEN) return;
-        w.send(JSON.stringify({ type: 'resize', cols, rows }));
-      }, 100);
+      if (isControllerRef.current) {
+        // Controller owns the PTY: SIGWINCH-toggle so Claude redraws clean.
+        const cols = term.cols;
+        const rows = term.rows;
+        w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
+        setTimeout(() => {
+          if (w.readyState !== WebSocket.OPEN) return;
+          w.send(JSON.stringify({ type: 'resize', cols, rows }));
+        }, 100);
+      } else {
+        // Viewer: the server ignores its resize, so a SIGWINCH toggle would
+        // just blank the screen. Ask for a capture-pane snapshot at the
+        // current PTY geometry instead, then rescale.
+        w.send(JSON.stringify({ type: 'refresh' }));
+        applyScaleRef.current?.();
+      }
       return;
     }
 
@@ -214,18 +225,13 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
 
-    // WebGL renderer — faster glyph rendering via GPU. Causes ~10% idle CPU
-    // in Tauri/WebKitGTK (compositor polls GL surfaces at vsync), but
-    // Chromium (Electron/browser) handles idle GL contexts properly.
-    try {
-      const webglAddon = new WebglAddon();
-      webglAddon.onContextLoss(() => {
-        webglAddon.dispose();
-      });
-      term.loadAddon(webglAddon);
-    } catch {
-      // WebGL not available, canvas2d renderer is the default fallback
-    }
+    // Renderer: xterm's default DOM renderer (NO WebGL/canvas addon). The
+    // dashboard CSS-scales viewer terminals to fit their card; scaling a WebGL
+    // canvas by a non-integer factor mis-positions rows and box-drawing glyphs
+    // — Claude's separator lines overlap the text and typing appears to
+    // overwrite the line above. This happens in both the browser and Electron
+    // (anywhere the render is scaled). The DOM renderer lays rows out by integer
+    // CSS line-height, so it stays pixel-correct at any scale or devicePixelRatio.
 
     // Make URLs in terminal output clickable — open in system browser
     term.loadAddon(new WebLinksAddon((event, url) => {
@@ -245,9 +251,12 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       }
     }));
 
-    // Fit after a small delay to ensure container is sized
+    // Fit after a small delay to ensure container is sized. Viewers stay at the
+    // server-owned PTY geometry (applied via geometry-changed) and only scale;
+    // fitting a viewer here would drift its geometry and race geometry-changed.
     requestAnimationFrame(() => {
-      fitAddon.fit();
+      if (isControllerRef.current) fitAddon.fit();
+      else scheduleScale();
     });
 
     // Intercept Ctrl+Shift+C to copy selection
@@ -344,19 +353,44 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       const xtermEl = container?.querySelector('.xterm') as HTMLElement | null;
       if (!container || !xtermEl) return;
       if (isControllerRef.current) {
+        // Controller drives its own size — no scaling; let xterm own its layout.
         xtermEl.style.transform = '';
         xtermEl.style.transformOrigin = '';
+        xtermEl.style.width = '';
+        xtermEl.style.height = '';
         return;
       }
       xtermEl.style.transform = '';
-      const natW = xtermEl.offsetWidth;
-      const natH = xtermEl.offsetHeight;
+      // Measure the ACTUAL terminal content (.xterm-screen = cols×rows in px).
+      // .xterm itself is constrained to the container, so we must (a) read the
+      // natural size from .xterm-screen and (b) FORCE .xterm to that natural
+      // size before scaling — otherwise the scaled .xterm box (and its
+      // viewport/scrollbar) lands mid-card while the content overflows it.
+      const screenEl = xtermEl.querySelector('.xterm-screen') as HTMLElement | null;
+      const natW = screenEl?.offsetWidth || xtermEl.offsetWidth;
+      const natH = screenEl?.offsetHeight || xtermEl.offsetHeight;
       if (!natW || !natH) return;
+      xtermEl.style.width = `${natW}px`;
+      xtermEl.style.height = `${natH}px`;
       const scale = Math.min(container.clientWidth / natW, container.clientHeight / natH);
       xtermEl.style.transformOrigin = 'top left';
       xtermEl.style.transform = `scale(${scale > 0 ? scale : 1})`;
     }
     applyScaleRef.current = applyScale;
+
+    // Coalesced, post-layout rescale. Measuring synchronously right after
+    // term.resize() (geometry-changed) or a layout change reads STALE .xterm
+    // dimensions, so the computed scale is wrong and — because nothing re-runs
+    // it — stays wrong. Deferring to the next frame measures the settled size.
+    let scaleRaf: number | null = null;
+    function scheduleScale() {
+      if (isControllerRef.current) return;
+      if (scaleRaf !== null) return;
+      scaleRaf = requestAnimationFrame(() => {
+        scaleRaf = null;
+        applyScale();
+      });
+    }
 
     function connectWs() {
       if (isSuspendedRef.current) return;
@@ -456,7 +490,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
               if (!isControllerRef.current && (term.cols !== msg.cols || term.rows !== msg.rows)) {
                 term.resize(msg.cols, msg.rows);
               }
-              applyScale();
+              // Defer: term.resize relayouts on the next frame; measuring now
+              // would scale against the old size.
+              scheduleScale();
               break;
           }
         } catch {
@@ -601,6 +637,17 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     });
     resizeObserver.observe(containerRef.current);
 
+    // The container observer above only fires when the CARD changes size. A
+    // viewer's render ALSO changes size when the server-owned PTY geometry
+    // changes (term.resize on geometry-changed) — the card stays the same, so
+    // that observer never fires and the CSS scale goes stale. This was the
+    // multi-client "broken layout" bug. Observing .xterm itself catches those
+    // geometry-driven relayouts and rescales once the new size is laid out.
+    // CSS transform doesn't affect the layout box, so applyScale never loops it.
+    const xtermElForScale = containerRef.current.querySelector('.xterm') as HTMLElement | null;
+    const xtermResizeObserver = xtermElForScale ? new ResizeObserver(() => scheduleScale()) : null;
+    if (xtermElForScale) xtermResizeObserver?.observe(xtermElForScale);
+
     return () => {
       intentionalClose = true;
       pendingTerminals.delete(sessionId);
@@ -611,7 +658,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (scaleRaf !== null) cancelAnimationFrame(scaleRaf);
       resizeObserver.disconnect();
+      xtermResizeObserver?.disconnect();
       pasteTarget.removeEventListener('paste', pasteHandler, { capture: true } as EventListenerOptions);
       wsRef.current?.close();
       term.dispose();
@@ -642,7 +691,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       const term = termRef.current;
       if (!term || !size) return;
       term.options.fontSize = size;
-      fitRef.current?.fit();
+      // Viewer: font is local-only; rescale, never fit (would drift geometry).
+      if (isControllerRef.current) fitRef.current?.fit();
       applyScaleRef.current?.();
     };
     window.addEventListener('octoally-terminal-font-size', onFont);
@@ -720,14 +770,19 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     if (!term) return;
     if (term.options.fontSize !== configuredFontSize) {
       term.options.fontSize = configuredFontSize;
-      fit?.fit();
-      // Notify PTY of new dimensions and force redraw via SIGWINCH toggle
-      if (w && w.readyState === WebSocket.OPEN) {
-        w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        setTimeout(() => {
-          w.send(JSON.stringify({ type: 'resize', cols: term.cols - 1, rows: term.rows }));
-          setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })), 50);
-        }, 50);
+      if (isControllerRef.current) {
+        fit?.fit();
+        // Controller owns the PTY: notify new dimensions + SIGWINCH redraw.
+        if (w && w.readyState === WebSocket.OPEN) {
+          w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          setTimeout(() => {
+            w.send(JSON.stringify({ type: 'resize', cols: term.cols - 1, rows: term.rows }));
+            setTimeout(() => w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows })), 50);
+          }, 50);
+        }
+      } else {
+        // Viewer: font is local-only; rescale, never resize the shared PTY.
+        applyScaleRef.current?.();
       }
     }
   }, [configuredFontSize]);
@@ -765,9 +820,18 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         const term = termRef.current;
         const w = wsRef.current;
         if (fit && term) {
-          fit.fit();
-          if (!passiveResizeRef.current && w && w.readyState === WebSocket.OPEN) {
-            w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          // Viewer: never fit (would drift geometry); just rescale to the card.
+          if (isControllerRef.current) fit.fit();
+          else applyScaleRef.current?.();
+          if (w && w.readyState === WebSocket.OPEN) {
+            if (isControllerRef.current) {
+              // Re-assert geometry ownership on becoming visible (e.g. returning
+              // from an expanded modal that had taken control): claim-control
+              // makes this socket the controller AND resizes the PTY to our fit.
+              w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
+            } else if (!passiveResizeRef.current) {
+              w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+            }
             // Codex: after resize, send capture-pane refresh for correct display.
             // Raw replay chunks from different widths render garbled for Codex.
             // Debounced so it doesn't stack with the suspension effect's refresh.
@@ -797,7 +861,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         const term = termRef.current;
         term.focus();
         requestAnimationFrame(() => {
-          fitRef.current?.fit();
+          // Viewer: rescale only; fitting would drift the geometry.
+          if (isControllerRef.current) fitRef.current?.fit();
+          else applyScaleRef.current?.();
           term.scrollToBottom();
           term.focus();
         });
@@ -880,18 +946,6 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         {connected && !suspended && (
           <>
             <button
-              onClick={() => setControllerActive((v) => !v)}
-              className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
-              style={controllerActive
-                ? { background: 'var(--accent)', color: 'white' }
-                : { background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
-              title={controllerActive
-                ? 'Rilascia il controllo della dimensione (torna a viewer scalato)'
-                : 'Adatta la dimensione del terminale alla mia finestra (prendi il controllo)'}
-            >
-              <Maximize2 className="w-3 h-3" />
-            </button>
-            <button
               onClick={() => {
                 const term = termRef.current;
                 const fit = fitRef.current;
@@ -901,6 +955,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                 if (current <= 6) return;
                 term.options.fontSize = current - 1;
                 if (isControllerRef.current) {
+                  // Controller: refit at the new font and resize the PTY so the
+                  // program reflows (text wraps to the card; vertical scroll).
                   fit?.fit();
                   if (w && w.readyState === WebSocket.OPEN) {
                     w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -911,8 +967,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                     }, 50);
                   }
                 } else {
-                  // Viewer: font is local-only; rescale the render, never resize PTY.
-                  applyScaleRef.current?.();
+                  // Viewer: a TUI only reflows if its PTY is resized, so zooming
+                  // claims control. The controllerActive effect then fits at the
+                  // new font and resizes the PTY → real reflow + native scroll,
+                  // not a blurry CSS magnify. Releasing control restores the view.
+                  setControllerActive(true);
                 }
               }}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"
@@ -931,6 +990,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                 if (current >= 32) return;
                 term.options.fontSize = current + 1;
                 if (isControllerRef.current) {
+                  // Controller: refit at the new font and resize the PTY so the
+                  // program reflows (text wraps to the card; vertical scroll).
                   fit?.fit();
                   if (w && w.readyState === WebSocket.OPEN) {
                     w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
@@ -940,7 +1001,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
                     }, 50);
                   }
                 } else {
-                  applyScaleRef.current?.();
+                  // Viewer: a TUI only reflows if its PTY is resized, so zooming
+                  // claims control → real reflow + native scroll (see Zoom out).
+                  setControllerActive(true);
                 }
               }}
               className="flex items-center gap-1 px-1.5 py-1 rounded text-xs transition-all opacity-70 hover:!opacity-100"

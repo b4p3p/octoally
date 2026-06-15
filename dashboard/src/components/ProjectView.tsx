@@ -1705,7 +1705,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                               sessionId={term.id}
                               visible={termVisible}
                               suspended={terminalsSuspended || (!gridMode && !termVisible)}
-                              passiveResize={gridMode && !isExpanded && projectSessions.find((s) => s.id === term.id)?.task === 'Terminal'}
+                              isController={!gridMode || isExpanded}
                               hideCursor={projectSessions.find((s) => s.id === term.id)?.task !== 'Terminal' && projectSessions.some((s) => s.id === term.id)}
                               cliType={sessionLookup.get(term.id)?.cli_type as 'claude' | 'codex' | undefined}
                               onReconnect={() => reconnectTerminal(term.id)}

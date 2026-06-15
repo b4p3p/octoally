@@ -138,11 +138,19 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
           socket.close();
           return;
         }
-        // Passive terminals forward input and handle refresh
+        // Passive terminals forward input and handle refresh. They never resize
+        // the shared PTY *unless* they explicitly claim control (e.g. the user
+        // zooms a grid card): claim-control lets the program reflow at the
+        // viewer's size; without it, passive views still leave geometry alone.
         socket.on('message', (raw: Buffer | string) => {
           try {
             const msg = JSON.parse(raw.toString());
             if (msg.type === 'input') writeToSession(sessionId, msg.data, msg.paste);
+            else if (msg.type === 'claim-control') claimControl(sessionId, socket, msg.cols, msg.rows);
+            else if (msg.type === 'release-control') releaseControl(sessionId, socket);
+            else if (msg.type === 'resize') {
+              if (isController(sessionId, socket)) resizeSession(sessionId, msg.cols, msg.rows);
+            }
             else if (msg.type === 'refresh') {
               console.log(`[REFRESH] ${sessionId}: passive client requested capture-pane refresh`);
               sendReplay(sessionId, socket, true);
