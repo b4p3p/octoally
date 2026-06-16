@@ -122,7 +122,13 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   // claims, the server sends `control-lost` and we drop to viewer (scale + apply
   // the controller's geometry). This is what lets the same session be open
   // full-screen on browser AND Electron without the two fighting.
-  const isControllerRef = useRef(isController);
+  // SAFETY: only the Electron desktop client may drive the shared PTY geometry.
+  // Any browser (networked PC / phone) is forced to a passive viewer — it never
+  // claims control or resizes — so it can NEVER break the Electron client's
+  // terminals. (`isController` = "wants control"; in a browser we drop it.)
+  const isElectronClient = typeof window !== 'undefined' && 'electronAPI' in window;
+  const wantsControl = isController && isElectronClient;
+  const isControllerRef = useRef(wantsControl);
   const applyScaleRef = useRef<(() => void) | null>(null);
   // Per-client LOCAL zoom for viewers: a CSS magnify multiplier applied on top
   // of the fit-to-card scale. Only affects THIS client's view — never the shared
@@ -486,7 +492,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         }
         // A view that WANTS control (full/expanded) claims it on connect — the
         // server arbitrates and demotes any previous controller. Viewers scale.
-        if (isController) {
+        if (wantsControl) {
           isControllerRef.current = true;
           fitAddon.fit();
           ws.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
@@ -742,7 +748,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   // control"). The server makes us the sole controller and demotes any previous
   // one (it gets `control-lost`). No-op for views that don't want control (grid).
   const claimControl = useCallback(() => {
-    if (!isController) return;
+    if (!wantsControl) return;
     const w = wsRef.current;
     const term = termRef.current;
     if (!w || w.readyState !== WebSocket.OPEN || !term) return;
@@ -767,7 +773,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     }
     fitRef.current?.fit();
     w.send(JSON.stringify({ type: 'claim-control', cols: term.cols, rows: term.rows }));
-  }, [isController]);
+  }, [wantsControl]);
   const claimControlRef = useRef(claimControl);
   claimControlRef.current = claimControl;
 
@@ -907,7 +913,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         const term = termRef.current;
         const w = wsRef.current;
         if (fit && term) {
-          if (isController) {
+          if (wantsControl) {
             // Full/expanded view: re-claim control on becoming visible (switching
             // back to this tab/client, or returning from an expanded modal). The
             // server makes us the controller again and demotes whoever had it.
