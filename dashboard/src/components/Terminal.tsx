@@ -207,9 +207,10 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     if (!containerRef.current) return;
     // Create terminal
     const term = new XTerm({
-      cursorBlink: false,
+      cursorBlink: hideCursor,
       cursorStyle: hideCursor ? 'bar' : 'block',
-      cursorWidth: hideCursor ? 1 : undefined,
+      cursorWidth: hideCursor ? 2 : undefined,
+      // Focused → show the caret; unfocused → none (keeps grid cards clean).
       cursorInactiveStyle: hideCursor ? 'none' : 'outline',
       fontSize: configuredFontSize,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
@@ -218,8 +219,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       theme: {
         background: '#0f1117',
         foreground: '#e4e8f1',
-        cursor: hideCursor ? '#0f1117' : '#3b82f6',
-        cursorAccent: hideCursor ? '#0f1117' : undefined,
+        cursor: '#3b82f6',
+        cursorAccent: undefined,
         selectionBackground: '#3b82f680',
         black: '#1a1d27',
         red: '#ef4444',
@@ -1132,7 +1133,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       </div>
       <div
         ref={containerRef}
-        className={`h-full w-full overflow-hidden${hideCursor ? ' hide-xterm-cursor' : ''}`}
+        className="h-full w-full overflow-hidden"
         style={{
           padding: '4px',
           background: '#0f1117',

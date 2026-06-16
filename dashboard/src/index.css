@@ -49,11 +49,6 @@ select:hover {
   filter: brightness(1.1);
 }
 
-/* Hide xterm.js cursor for Claude Code sessions (the CLI renders its own cursor) */
-.hide-xterm-cursor .xterm-cursor-layer {
-  display: none !important;
-}
-
 /* Markdown preview styles */
 .markdown-preview {
   font-size: 14px;
