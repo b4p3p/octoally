@@ -8,6 +8,12 @@ import { RotateCcw, ExternalLink, ZoomIn, ZoomOut } from 'lucide-react';
 import { useSpeechStore } from '../lib/speech';
 import { isKeyboardNavActive } from '../lib/shortcuts';
 import { api } from '../lib/api';
+import {
+  markTerminalConnecting,
+  markTerminalSettled,
+  notifyServerAlive,
+  subscribeServerAlive,
+} from '../lib/terminal-registry';
 import { HistoryViewer } from './HistoryViewer';
 import '@xterm/xterm/css/xterm.css';
 
@@ -24,25 +30,10 @@ function setSkipPopOutConfirm(skip: boolean): void {
   try { localStorage.setItem(POPOUT_SKIP_KEY, String(skip)); } catch { /* ignore */ }
 }
 
-// Global event: when any terminal connects, notify all others to retry immediately.
-// This prevents staggered reconnects after a server restart.
-const serverAliveListeners = new Set<() => void>();
-function notifyServerAlive() {
-  for (const fn of serverAliveListeners) fn();
-}
-
-
-// Global terminal connection tracking — lets App.tsx show a "connecting" indicator
-const pendingTerminals = new Set<string>();
-const connectionListeners = new Set<() => void>();
-export function getPendingTerminalCount() { return pendingTerminals.size; }
-export function onTerminalConnectionChange(fn: () => void) {
-  connectionListeners.add(fn);
-  return () => { connectionListeners.delete(fn); };
-}
-function notifyConnectionChange() {
-  for (const fn of connectionListeners) fn();
-}
+// Cross-terminal coordination (connection tracking + server-alive fan-out) lives
+// in lib/terminal-registry. Re-export the public API so existing importers of
+// this module keep working.
+export { getPendingTerminalCount, onTerminalConnectionChange } from '../lib/terminal-registry';
 
 interface TerminalProps {
   sessionId: string;
@@ -476,13 +467,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       params.set('attempt', String(reconnectAttempts));
       const ws = new WebSocket(`${protocol}//${window.location.host}/api/terminal/${sessionId}?${params}`);
       wsRef.current = ws;
-      pendingTerminals.add(sessionId);
-      notifyConnectionChange();
+      markTerminalConnecting(sessionId);
 
       ws.onopen = () => {
         setConnected(true);
-        pendingTerminals.delete(sessionId);
-        notifyConnectionChange();
+        markTerminalSettled(sessionId);
         reconnectAttempts = 0;
         // If a resize was missed while WS was connecting, send it now. This also
         // triggers lazy-spawn of pending sessions; the server ignores its
@@ -634,7 +623,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         connectWs();
       }
     }
-    serverAliveListeners.add(onServerAlive);
+    const unsubscribeServerAlive = subscribeServerAlive(onServerAlive);
 
     // Expose to the suspension effect
     connectFnRef.current = connectWs;
@@ -728,9 +717,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
 
     return () => {
       intentionalClose = true;
-      pendingTerminals.delete(sessionId);
-      notifyConnectionChange();
-      serverAliveListeners.delete(onServerAlive);
+      markTerminalSettled(sessionId);
+      unsubscribeServerAlive();
       connectFnRef.current = null;
       disconnectFnRef.current = null;
       if (rafId !== null) cancelAnimationFrame(rafId);
