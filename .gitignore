@@ -41,3 +41,16 @@ CLAUDE.local.md
 .octoally-pro/
 # OctoAlly-generated agents manifest
 AGENTS.md
+
+# Secrets / credentials (public repo — never commit these)
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+id_rsa
+id_rsa.*
+*.crt
+secrets.json
+credentials.json
+.netrc

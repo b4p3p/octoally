@@ -37,7 +37,9 @@
     "install:all": "npm install && cd server && npm install && cd ../dashboard && npm install",
     "clean": "cd server && rm -rf dist && cd ../dashboard && rm -rf dist",
     "deploy": "bash scripts/deploy-dev.sh",
-    "deploy:ui": "npm run build:dashboard && rsync -a --delete dashboard/dist/ \"$HOME/octoally/dashboard/dist/\""
+    "deploy:ui": "npm run build:dashboard && rsync -a --delete dashboard/dist/ \"$HOME/octoally/dashboard/dist/\"",
+    "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
+    "scan:secrets": "bash scripts/secret-scan.sh tree"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
