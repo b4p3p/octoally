@@ -681,7 +681,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                       }
                     }}
                   />
-                  <Terminal sessionId={session.id} visible={!expanded} isController={false} hideCursor={session.task !== 'Terminal'} cliType={(session as any).cli_type as 'claude' | 'codex' | undefined} onPopOut={() => queryClient.invalidateQueries({ queryKey: ['sessions'] })} />
+                  <Terminal sessionId={session.id} visible={!expanded} suspended={!!expanded && expanded.session.id === session.id} isController={true} hideCursor={session.task !== 'Terminal'} cliType={(session as any).cli_type as 'claude' | 'codex' | undefined} onPopOut={() => queryClient.invalidateQueries({ queryKey: ['sessions'] })} />
                 </div>
               </div>
               );
