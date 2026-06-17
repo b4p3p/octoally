@@ -40,21 +40,21 @@ interface ProjectTab {
 
 const APP_STATE_KEY = 'octoally-app-state-v2';
 
-function loadAppState(): { activeTab: string; projectTabs: ProjectTab[] } | null {
+function loadAppState(): { activeTab: string; projectTabs: ProjectTab[]; showActiveTerminals: boolean } | null {
   try {
     const raw = localStorage.getItem(APP_STATE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed.activeTab === 'string' && Array.isArray(parsed.projectTabs)) {
-      return parsed;
+      return { ...parsed, showActiveTerminals: !!parsed.showActiveTerminals };
     }
   } catch {}
   return null;
 }
 
-function saveAppState(activeTab: string, projectTabs: ProjectTab[]) {
+function saveAppState(activeTab: string, projectTabs: ProjectTab[], showActiveTerminals: boolean) {
   try {
-    localStorage.setItem(APP_STATE_KEY, JSON.stringify({ activeTab, projectTabs }));
+    localStorage.setItem(APP_STATE_KEY, JSON.stringify({ activeTab, projectTabs, showActiveTerminals }));
   } catch {}
 }
 
@@ -189,7 +189,7 @@ function Dashboard() {
   const activeSessionCount = sessions.filter(
     (s) => s.status === 'running' || s.status === 'detached'
   ).length;
-  const [showActiveTerminals, setShowActiveTerminals] = useState(false);
+  const [showActiveTerminals, setShowActiveTerminals] = useState(savedState?.showActiveTerminals ?? false);
   const [showSettings, setShowSettings] = useState(false);
   const [showCloseApp, setShowCloseApp] = useState(false);
 
@@ -309,8 +309,8 @@ function Dashboard() {
 
   // Persist app state
   useEffect(() => {
-    saveAppState(activeTab, projectTabs);
-  }, [activeTab, projectTabs]);
+    saveAppState(activeTab, projectTabs, showActiveTerminals);
+  }, [activeTab, projectTabs, showActiveTerminals]);
 
   // Tab navigation shortcuts — cycle across 'home' + open project tabs.
   // markKeyboardNav() raises a short-lived flag so the newly visible
