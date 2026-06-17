@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { Session, Project } from '../lib/api';
 import { Terminal } from './Terminal';
-import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Rows3, Zap, Bot, TerminalSquare, Minus } from 'lucide-react';
+import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Rows3, Zap, Bot, TerminalSquare, Minus, Pencil } from 'lucide-react';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { modelBadgeLabel } from './ModelPicker';
 
@@ -29,6 +29,20 @@ interface ExpandedSession {
 const COLUMNS_KEY = 'octoally-active-terminals-cols';
 const ROWS_KEY = 'octoally-active-terminals-rows';
 const MINIMIZED_KEY = 'octoally-active-terminals-minimized';
+const LABELS_KEY = 'octoally-active-terminals-labels';
+
+// Per-session custom names, stored client-side only (see the persistence note
+// where this is used). Keyed by session id → user-chosen label.
+function loadLabels(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LABELS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
 
 export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenSessionIds }: ActiveTerminalsProps) {
   const queryClient = useQueryClient();
@@ -62,6 +76,67 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
   const gridRef = useRef<HTMLDivElement>(null);
   const [cardHeight, setCardHeight] = useState(420);
 
+  // Custom per-session names. Client-side only (localStorage): they're meant for
+  // telling apart multiple sessions on the same project while working on THIS
+  // desktop client, so they intentionally don't sync to other devices.
+  const [labels, setLabels] = useState<Record<string, string>>(loadLabels);
+  const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
+  const [editingLabelValue, setEditingLabelValue] = useState('');
+
+  function startRename(id: string) {
+    setEditingLabelValue(labels[id] ?? '');
+    setEditingLabelId(id);
+  }
+  function commitRename(id: string) {
+    const trimmed = editingLabelValue.trim();
+    setLabels((prev) => {
+      const next = { ...prev };
+      if (trimmed) next[id] = trimmed;
+      else delete next[id];
+      try { localStorage.setItem(LABELS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+    setEditingLabelId(null);
+  }
+  function cancelRename() {
+    setEditingLabelId(null);
+  }
+
+  // Title shown in a card/tray header: the custom name when set, otherwise the
+  // task. Double-clicking (or the rename button) turns it into an inline editor.
+  function renderTitle(session: Session, className: string) {
+    const custom = labels[session.id];
+    if (editingLabelId === session.id) {
+      return (
+        <input
+          autoFocus
+          value={editingLabelValue}
+          onChange={(e) => setEditingLabelValue(e.target.value)}
+          onBlur={() => commitRename(session.id)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); commitRename(session.id); }
+            else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          placeholder={session.task || 'Terminal'}
+          className={`${className} px-1 rounded outline-none`}
+          style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)', border: '1px solid var(--accent)', minWidth: '90px' }}
+        />
+      );
+    }
+    return (
+      <span
+        className={`${className} cursor-text`}
+        style={{ color: custom ? 'var(--text-primary)' : 'var(--text-secondary)' }}
+        title={custom ? `${custom} — double-click to rename` : 'Double-click to rename'}
+        onDoubleClick={() => startRename(session.id)}
+      >
+        {custom || session.task || 'Terminal'}
+      </span>
+    );
+  }
+
   // Persist column and row preferences
   useEffect(() => {
     localStorage.setItem(COLUMNS_KEY, String(columns));
@@ -88,8 +163,8 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
       if (rows !== 'auto') {
         if (!scrollContainerRef.current) return;
         const containerHeight = scrollContainerRef.current.clientHeight;
-        const gap = 16; // gap-4 = 16px
-        const padding = 32; // p-4 = 16px * 2
+        const gap = 1; // gap-px = 1px
+        const padding = 8; // p-1 = 4px * 2
         // Floor (not round) so the summed card heights + gaps + padding never
         // exceed the container — rounding up by even 1px triggers a scrollbar.
         const height = Math.floor((containerHeight - padding - gap * (rows - 1)) / rows);
@@ -97,7 +172,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
       } else {
         if (!gridRef.current) return;
         const gridWidth = gridRef.current.clientWidth;
-        const gap = 16;
+        const gap = 1;
         const cardWidth = (gridWidth - gap * (columns - 1)) / columns;
         const height = Math.round(cardWidth * (9 / 16)) + 40;
         setCardHeight(Math.max(200, height));
@@ -501,8 +576,8 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                   title="Restore to grid"
                 >
                   <span>{groupLabel}</span>
-                  <span style={{ color: 'var(--text-secondary)' }} className="max-w-[160px] truncate">
-                    {session.task || 'Terminal'}
+                  <span style={{ color: labels[session.id] ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="max-w-[160px] truncate">
+                    {labels[session.id] || session.task || 'Terminal'}
                   </span>
                 </button>
                 <div
@@ -539,7 +614,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
 
       {/* Grid — always render the container so Terminal components don't get
           destroyed/recreated when the cards list changes between renders */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 relative">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-1 relative">
         {cards.length === 0 && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center">
@@ -552,7 +627,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
         )}
         <div
           ref={gridRef}
-          className="grid gap-4"
+          className="grid gap-px"
           style={{ gridTemplateColumns: `repeat(${columns}, 1fr)` }}
         >
           {cards.map(({ session, groupLabel, projectId }) => {
@@ -604,9 +679,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                   <span className="text-xs font-medium shrink-0" style={{ color: 'var(--text-primary)' }}>
                     {groupLabel}
                   </span>
-                  <span className="text-[10px] truncate min-w-0 ml-auto" style={{ color: 'var(--text-secondary)' }}>
-                    {session.task || 'Terminal'}
-                  </span>
+                  {renderTitle(session, 'text-[10px] truncate min-w-0 ml-auto')}
                   {(session as any).model && (
                     <span
                       className="text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0"
@@ -622,6 +695,14 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                       background: session.status === 'running' ? 'var(--success)' : 'var(--warning)',
                     }}
                   />
+                  <button
+                    onClick={() => startRename(session.id)}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
+                    style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+                    title="Rename session"
+                  >
+                    <Pencil className="w-2.5 h-2.5" />
+                  </button>
                   <button
                     onClick={() => minimize(session.id)}
                     className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
@@ -740,9 +821,15 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
               <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>
                 {expanded.groupLabel}
               </span>
-              <span className="text-xs ml-2 truncate" style={{ color: 'var(--text-secondary)' }}>
-                {expanded.session.task || 'Terminal'}
-              </span>
+              {renderTitle(expanded.session, 'text-xs ml-2 truncate min-w-0')}
+              <button
+                onClick={() => startRename(expanded.session.id)}
+                className="flex items-center justify-center w-6 h-6 rounded shrink-0 transition-colors hover:opacity-100 opacity-70"
+                style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+                title="Rename session"
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
               <div className="flex items-center gap-2 ml-auto shrink-0">
                 {expanded.projectId && (
                   <button
