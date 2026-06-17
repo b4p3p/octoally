@@ -907,6 +907,16 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
             // back to this tab/client, or returning from an expanded modal). The
             // server makes us the controller again and demotes whoever had it.
             claimControlRef.current();
+            // A freshly-created session (e.g. the "New" button) mounts straight
+            // into the full view: on this first pass the WS may not be open yet
+            // (so claimControl no-ops) and cell metrics/layout can still be
+            // settling, leaving the PTY locked at a too-small geometry. The
+            // container is already at full size with no further resize event
+            // coming, so the ResizeObserver never corrects it. Re-fit + re-claim
+            // once things have settled (WS open) so the terminal fills the view.
+            setTimeout(() => {
+              if (!cancelled) claimControlRef.current();
+            }, 200);
           } else {
             // Viewer: rescale to the card; never touch the shared PTY.
             applyScaleRef.current?.();
