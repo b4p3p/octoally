@@ -3,6 +3,17 @@
 Local-first orchestration dashboard for Claude Code & OpenAI Codex sessions.
 Monorepo: a headless engine plus web and desktop clients.
 
+> **Disclaimer — desktop-first fork.** This fork intentionally diverges from
+> upstream (`ai-genius-automations/octoally`): it privileges the **Electron desktop
+> client** as the single controller of terminal geometry. Upstream lets every
+> connected client (browser, phone, desktop) drive the shared PTY, which re-opens
+> the "smallest attached client wins" reflow conflict on a session. Here, only the
+> desktop drives geometry (`wantsControl = isController && window.electronAPI` in
+> `dashboard/src/components/Terminal.tsx`); any browser is a **passive viewer** — it
+> reads output and can send input, but never resizes or claims control, so it can't
+> garble the desktop's terminals. Deliberate trade-off: a rock-solid desktop terminal
+> experience, at the cost of full interactive control from browser/mobile clients.
+
 ## Commands
 
 - **Dev (isolated — always test here):** `npm run dev:isolated`
