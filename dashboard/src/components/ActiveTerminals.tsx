@@ -746,7 +746,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                   </button>
                 </div>
                 {/* Live terminal — overlay blocks scroll on unfocused terminals */}
-                <div className="flex-1 min-h-0 relative">
+                <div className="flex-1 min-h-0 relative group/termcell">
                   <div
                     className="absolute inset-0 z-[5]"
                     style={{ pointerEvents: isFocused ? 'none' : 'auto' }}

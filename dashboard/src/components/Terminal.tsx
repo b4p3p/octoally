@@ -1031,7 +1031,11 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     <div className="h-full relative group/terminal" onClick={() => { termRef.current?.focus(); claimControlRef.current(); }}>
       <div className="absolute top-2 right-5 z-10 flex items-center gap-2">
         {connected && !suspended && (
-          <>
+          // Hover-reveal: these per-terminal controls overlap the first rows of
+          // output, which reads as a glitch on the dense Active Sessions grid.
+          // Hidden (and click-through, so clicks reach the focus overlay) until
+          // the terminal — or its grid cell (group/termcell) — is hovered.
+          <div className="flex items-center gap-2 opacity-0 pointer-events-none transition-opacity duration-150 group-hover/terminal:opacity-100 group-hover/terminal:pointer-events-auto group-hover/termcell:opacity-100 group-hover/termcell:pointer-events-auto">
             <button
               onClick={() => {
                 const term = termRef.current;
@@ -1112,7 +1116,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
             >
               <RotateCcw className="w-3 h-3" />
             </button>
-          </>
+          </div>
         )}
         {!connected && !suspended && (
           <>
