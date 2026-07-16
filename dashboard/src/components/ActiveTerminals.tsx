@@ -151,7 +151,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
   useEffect(() => {
     const sessions = (queryClient.getQueryData(['sessions']) as { sessions?: Session[] } | undefined)?.sessions ?? [];
     const aliveIds = new Set(
-      sessions.filter((s) => s.status === 'running' || s.status === 'detached').map((s) => s.id),
+      sessions.filter((s) => s.status === 'running' || s.status === 'detached' || s.status === 'pending').map((s) => s.id),
     );
     const valid = [...minimizedSessionIds].filter((id) => aliveIds.has(id));
     localStorage.setItem(MINIMIZED_KEY, JSON.stringify(valid));
@@ -220,8 +220,11 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
   const projects = projectsData?.projects || [];
   const projectMap = new Map<string, Project>(projects.map((p) => [p.id, p]));
 
+  // 'pending' included: a freshly-created session only spawns its PTY when
+  // a mounted Terminal attaches and sends the first resize (lazy spawn) —
+  // the grid card must mount for overlay-launched sessions to ever start.
   const activeSessions = sessions.filter(
-    (s) => s.status === 'running' || s.status === 'detached'
+    (s) => s.status === 'running' || s.status === 'detached' || s.status === 'pending'
   );
 
   // Split into shown (open tab or plain terminal) vs hidden (tab not open or individually hidden)

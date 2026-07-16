@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { trpc, createTRPCClient } from './lib/trpc';
 import { connectStream, useStreamStore, setQueryClient } from './lib/websocket';
-import { api } from './lib/api';
+import { api, type Project } from './lib/api';
 import { ProjectDashboard } from './components/ProjectDashboard';
 import { ProjectView, cleanupProjectStorage } from './components/ProjectView';
 import { X, LayoutGrid, FolderOpen, Monitor, Settings, ArrowUpCircle, CopyPlus } from 'lucide-react';
@@ -12,6 +12,7 @@ import { CloseTabModal } from './components/CloseTabModal';
 import { CloseAppModal } from './components/CloseAppModal';
 import { SettingsModal } from './components/SettingsModal';
 import { ActiveTerminals } from './components/ActiveTerminals';
+import { TaskModal } from './components/SessionLauncher';
 import { GlobalMicButton } from './components/GlobalMicButton';
 import { GlobalDictationButton } from './components/GlobalDictationButton';
 import { ModelDownloadModal } from './components/ModelDownloadModal';
@@ -376,6 +377,25 @@ function Dashboard() {
   const [tabMenu, setTabMenu] = useState<{ projectId: string; x: number; y: number } | null>(null);
   const [launchPrefill, setLaunchPrefill] = useState<{ projectId: string; task?: string; model?: string; cliType?: 'claude' | 'codex' } | null>(null);
 
+  // "Duplicate last session" invoked while the Active Sessions overlay is
+  // open: render the TaskModal on top of the grid and launch in place —
+  // the overlay never closes and no tab switch happens. (Spec:
+  // docs/superpowers/specs/2026-07-16-duplicate-session-respect-active-grid-design.md)
+  const [overlayDuplicate, setOverlayDuplicate] = useState<{
+    project: Project;
+    task?: string;
+    model?: string;
+    cliType?: 'claude' | 'codex';
+  } | null>(null);
+
+  // The overlay modal must not outlive the overlay: if Active Sessions is
+  // dismissed while the modal is open (e.g. via voice navigation), a launch
+  // would create a session nothing ever mounts a Terminal for — the lazy
+  // spawn never fires and the watchdog auto-fails it after 90s.
+  useEffect(() => {
+    if (!showActiveTerminals) setOverlayDuplicate(null);
+  }, [showActiveTerminals]);
+
   // Close the tab context menu on Escape
   useEffect(() => {
     if (!tabMenu) return;
@@ -393,15 +413,54 @@ function Dashboard() {
     const source = sessions
       .filter((s) => s.project_id === projectId && s.task !== 'Terminal' && !s.task.startsWith('Agent ('))
       .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
-    setLaunchPrefill({
-      projectId,
+    const prefill = {
       task: source?.task,
       model: source?.model || undefined,
       cliType: source?.cli_type,
-    });
+    };
+    // Overlay open: launch in place over the grid — no navigation, the new
+    // card shows up in the grid via the ['sessions'] query. Falls through to
+    // the classic flow if the project object isn't loaded yet.
+    const project = projects.find((p) => p.id === projectId);
+    if (showActiveTerminals && project) {
+      setOverlayDuplicate({ project, ...prefill });
+      return;
+    }
+    setLaunchPrefill({ projectId, ...prefill });
     setActiveTab(`project-${projectId}`);
     dismissActiveTerminals();
-  }, [sessions, dismissActiveTerminals]);
+  }, [sessions, projects, showActiveTerminals, dismissActiveTerminals]);
+
+  // Agents for the overlay TaskModal — same key/fn as SessionLauncher, so the
+  // cache is shared and this is usually a no-op fetch. Session mode doesn't
+  // use the list, but TaskModal requires the prop.
+  const { data: overlayAgentsData } = useQuery({
+    queryKey: ['project-agents', overlayDuplicate?.project.id],
+    queryFn: () => api.projects.rufloAgents(overlayDuplicate!.project.id),
+    staleTime: 120_000,
+    enabled: !!overlayDuplicate,
+  });
+
+  // Launch from the overlay TaskModal — same parameter mapping as
+  // SessionLauncher's createMutation, minus navigation: on success we only
+  // refresh the sessions list so the new card appears in the grid.
+  const overlayCreateMutation = useMutation({
+    mutationFn: (opts: { project: Project; task: string; cliType?: 'claude' | 'codex'; model?: string; rememberModel?: boolean }) =>
+      api.sessions.create({
+        project_path: opts.project.path,
+        task: opts.task,
+        mode: 'session',
+        project_id: opts.project.id,
+        cli_type: opts.cliType,
+        model: opts.model || undefined,
+        remember_model: opts.rememberModel || undefined,
+      }),
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      if (vars.rememberModel) queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setOverlayDuplicate(null);
+    },
+  });
 
   const [confirmClose, setConfirmClose] = useState<{ projectId: string; count: number } | null>(null);
 
@@ -765,6 +824,30 @@ function Dashboard() {
             </button>
           </div>
         </>
+      )}
+
+      {/* "Duplicate last session" over the Active Sessions overlay: TaskModal
+          is fixed inset-0 z-50, so it stacks above the overlay (z-20). */}
+      {overlayDuplicate && (
+        <TaskModal
+          mode="session"
+          project={overlayDuplicate.project}
+          agents={overlayAgentsData?.agents ?? []}
+          codexReady={true}
+          initialCliType={overlayDuplicate.cliType}
+          initialTask={overlayDuplicate.task}
+          initialModel={overlayDuplicate.model}
+          onClose={() => setOverlayDuplicate(null)}
+          onLaunch={(task, _agentType, cliType, model, rememberModel) =>
+            overlayCreateMutation.mutate({
+              project: overlayDuplicate.project,
+              task,
+              cliType,
+              model,
+              rememberModel,
+            })
+          }
+        />
       )}
 
       {confirmClose && (
