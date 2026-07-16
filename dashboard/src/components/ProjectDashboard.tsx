@@ -261,15 +261,20 @@ function ProjectForm({
       return api.projects.update(project!.id, fields as any);
     },
     onSuccess: async () => {
-      // Write any edited files to the (possibly repointed) path, not the stale one.
-      const savePath = normalizePath(path) || project!.path;
-      try {
-        if (claudeMd !== initialClaudeMd) await api.files.write(`${savePath}/CLAUDE.md`, claudeMd);
-        if (agentsMd !== initialAgentsMd) await api.files.write(`${savePath}/AGENTS.md`, agentsMd);
-        if (settingsJson !== initialSettingsJson)
-          await api.files.write(`${savePath}/.claude/settings.json`, settingsJson);
-      } catch {
-        // best-effort file writes
+      // The config-file editors were loaded from the OLD folder. If the project was
+      // just repointed, writing their content would clobber files in the NEW folder
+      // that the user never saw — skip the writes (a warning next to the path field
+      // says so upfront) and let the user re-edit against the new folder.
+      if (normalizePath(path) === normalizePath(project!.path)) {
+        const savePath = project!.path;
+        try {
+          if (claudeMd !== initialClaudeMd) await api.files.write(`${savePath}/CLAUDE.md`, claudeMd);
+          if (agentsMd !== initialAgentsMd) await api.files.write(`${savePath}/AGENTS.md`, agentsMd);
+          if (settingsJson !== initialSettingsJson)
+            await api.files.write(`${savePath}/.claude/settings.json`, settingsJson);
+        } catch {
+          // best-effort file writes
+        }
       }
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       onSubmit();
@@ -345,6 +350,11 @@ function ProjectForm({
   });
 
   const pathChanged = mode === 'edit' && editingPath !== normalizePath(project!.path);
+  // Unsaved edits in the config-file editors. Their content was loaded from the
+  // CURRENT folder, so if the path is being changed these edits are NOT written
+  // on save (see updateMutation.onSuccess) — warn about it next to the field.
+  const hasFileEdits =
+    claudeMd !== initialClaudeMd || agentsMd !== initialAgentsMd || settingsJson !== initialSettingsJson;
   const pathWarnings: string[] = [];
   if (editingPath) {
     if (!editingPath.startsWith('/')) pathWarnings.push('Path is not absolute — it should start with "/".');
@@ -415,6 +425,15 @@ function ProjectForm({
               {mode === 'edit' && pathChanged && (
                 <p className="text-[10px] mt-1" style={{ color: 'var(--text-secondary)' }}>
                   Repoints this project to a new folder. Files are not moved or renamed.
+                </p>
+              )}
+              {mode === 'edit' && pathChanged && hasFileEdits && (
+                <p className="text-[10px] mt-1 flex items-start gap-1" style={{ color: '#f59e0b' }}>
+                  <AlertTriangle className="w-3 h-3 mt-px shrink-0" />
+                  <span>
+                    Your CLAUDE.md / AGENTS.md / settings edits will NOT be saved: they were
+                    loaded from the old folder. Save the new path first, then re-edit them.
+                  </span>
                 </p>
               )}
               {/* Warn-only validation — advisory, does not block saving */}
