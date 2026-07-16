@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import type { WebSocket } from 'ws';
 import {
   attachTerminal, writeToSession, resizeSession, reconnectSession,
   getPendingSpawn, consumePendingSpawn, spawnSession, spawnTerminal, spawnAdopt, spawnAgent,
@@ -12,6 +13,37 @@ import {
 function sendGeometry(sessionId: string, socket: { send: (s: string) => void }): void {
   const g = getGeometry(sessionId);
   try { socket.send(JSON.stringify({ type: 'geometry-changed', cols: g.cols, rows: g.rows })); } catch { /* ignore */ }
+}
+
+/** Full message protocol for a live (attached) session socket. Shared by the
+ *  passive, active, and post-spawn pending paths so a socket never speaks a
+ *  reduced dialect: claim-control/release-control always work, and resize is
+ *  honored ONLY from the current controller — viewers never resize the shared
+ *  PTY (this is what prevents cross-client garbage). */
+function handleLiveMessage(sessionId: string, socket: WebSocket, msg: any): void {
+  switch (msg.type) {
+    case 'input':
+      writeToSession(sessionId, msg.data, msg.paste);
+      break;
+    case 'claim-control':
+      // This connection becomes the geometry owner; the PTY adopts its
+      // requested size and all viewers are told to re-scale.
+      claimControl(sessionId, socket, msg.cols, msg.rows);
+      break;
+    case 'release-control':
+      // Back to viewer; PTY returns to DEFAULT_GEOMETRY for everyone.
+      releaseControl(sessionId, socket);
+      break;
+    case 'resize':
+      if (isController(sessionId, socket)) resizeSession(sessionId, msg.cols, msg.rows);
+      break;
+    case 'refresh':
+      // Client requested a fresh display — use tmux capture-pane
+      // to get the current visual state (like adopt does).
+      console.log(`[REFRESH] ${sessionId}: client requested capture-pane refresh`);
+      sendReplay(sessionId, socket, true);
+      break;
+  }
 }
 import { getDb } from '../db/index.js';
 
@@ -39,6 +71,16 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
     const pending = getPendingSpawn(sessionId);
     if (pending) {
       let spawned = false;
+      // True once attachTerminal succeeded — only then is the session in
+      // activeSessions and able to honor claim/resize/refresh messages.
+      let liveAttached = false;
+      // Latest claim-control received before the spawn+attach completed. The
+      // creating client (Electron full view) sends its claim right at WS open,
+      // while the spawn is still in flight — without buffering it the claim
+      // would be silently dropped, the PTY would stay at DEFAULT_GEOMETRY and
+      // the fresh session would render with a wrong right margin until the
+      // client reconnected (the "new session opens mis-sized" bug).
+      let pendingClaim: { cols: number; rows: number } | null = null;
 
       // If this WebSocket closes before spawning, do nothing — the pending
       // spawn stays in the map for the next connection to pick up.
@@ -50,13 +92,26 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
         try {
           const msg = JSON.parse(raw.toString());
 
+          if (!liveAttached && msg.type === 'claim-control') {
+            // Remember the claim; it is applied as soon as the PTY exists.
+            pendingClaim = { cols: msg.cols, rows: msg.rows };
+            return;
+          }
+
           if (!spawned && msg.type === 'resize') {
             // Now consume — this connection will own the spawn
             const info = consumePendingSpawn(sessionId);
             if (!info) {
               // Another connection beat us — try normal attach
               const attached = attachTerminal(sessionId, socket);
-              if (attached) { spawned = true; }
+              if (attached) {
+                spawned = true;
+                liveAttached = true;
+                if (pendingClaim) {
+                  claimControl(sessionId, socket, pendingClaim.cols, pendingClaim.rows);
+                  pendingClaim = null;
+                }
+              }
               return;
             }
 
@@ -81,7 +136,15 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
                 socket.send(JSON.stringify({ type: 'error', message: 'Failed to attach after spawn' }));
                 socket.close();
               } else {
-                sendGeometry(sessionId, socket);
+                liveAttached = true;
+                if (pendingClaim) {
+                  // Honor the claim that arrived while spawning: this client
+                  // becomes the controller and the PTY adopts its geometry.
+                  claimControl(sessionId, socket, pendingClaim.cols, pendingClaim.rows);
+                  pendingClaim = null;
+                } else {
+                  sendGeometry(sessionId, socket);
+                }
               }
             } catch (err: any) {
               socket.send(JSON.stringify({ type: 'error', message: `Spawn failed: ${err.message}` }));
@@ -90,18 +153,9 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
             return;
           }
 
-          if (spawned) {
-            switch (msg.type) {
-              case 'input':
-                writeToSession(sessionId, msg.data, msg.paste);
-                break;
-              case 'resize':
-                resizeSession(sessionId, msg.cols, msg.rows);
-                break;
-            }
-          }
+          if (liveAttached) handleLiveMessage(sessionId, socket, msg);
         } catch {
-          if (spawned) writeToSession(sessionId, raw.toString());
+          if (liveAttached) writeToSession(sessionId, raw.toString());
         }
       });
 
@@ -145,16 +199,7 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
         socket.on('message', (raw: Buffer | string) => {
           try {
             const msg = JSON.parse(raw.toString());
-            if (msg.type === 'input') writeToSession(sessionId, msg.data, msg.paste);
-            else if (msg.type === 'claim-control') claimControl(sessionId, socket, msg.cols, msg.rows);
-            else if (msg.type === 'release-control') releaseControl(sessionId, socket);
-            else if (msg.type === 'resize') {
-              if (isController(sessionId, socket)) resizeSession(sessionId, msg.cols, msg.rows);
-            }
-            else if (msg.type === 'refresh') {
-              console.log(`[REFRESH] ${sessionId}: passive client requested capture-pane refresh`);
-              sendReplay(sessionId, socket, true);
-            }
+            handleLiveMessage(sessionId, socket, msg);
           } catch { /* ignore */ }
         });
         sendGeometry(sessionId, socket);
@@ -182,37 +227,7 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
       socket.on('message', (raw: Buffer | string) => {
         try {
           const msg = JSON.parse(raw.toString());
-
-          switch (msg.type) {
-            case 'input':
-              writeToSession(sessionId, msg.data, msg.paste);
-              break;
-
-            case 'claim-control':
-              // This connection becomes the geometry owner; the PTY adopts its
-              // requested size and all viewers are told to re-scale.
-              claimControl(sessionId, socket, msg.cols, msg.rows);
-              break;
-
-            case 'release-control':
-              // Back to viewer; PTY returns to DEFAULT_GEOMETRY for everyone.
-              releaseControl(sessionId, socket);
-              break;
-
-            case 'resize':
-              // Honored ONLY from the current controller — viewers never resize
-              // the shared PTY (this is what prevents cross-client garbage).
-              if (isController(sessionId, socket)) resizeSession(sessionId, msg.cols, msg.rows);
-              break;
-
-            case 'refresh':
-              // Client requested a fresh display — use tmux capture-pane
-              // to get the current visual state (like adopt does).
-              // This fixes Codex rendering issues without pop-out/re-adopt.
-              console.log(`[REFRESH] ${sessionId}: client requested capture-pane refresh`);
-              sendReplay(sessionId, socket, true);
-              break;
-          }
+          handleLiveMessage(sessionId, socket, msg);
         } catch {
           writeToSession(sessionId, raw.toString());
         }
