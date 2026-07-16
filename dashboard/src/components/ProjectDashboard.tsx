@@ -119,6 +119,14 @@ function prevFolderName(path: string): string {
   return parts[parts.length - 1] || '';
 }
 
+/** Strip trailing slashes / whitespace so a typed `/home/x/repos/` compares and saves
+ *  the same as the picker's `/home/x/repos`. Mirrors the server's normalizeProjectPath. */
+function normalizePath(path: string): string {
+  const trimmed = (path || '').trim();
+  if (trimmed === '/' || trimmed === '') return trimmed;
+  return trimmed.replace(/\/+$/, '');
+}
+
 const inputStyle = {
   background: 'var(--bg-tertiary)',
   borderColor: 'var(--border)',
@@ -240,7 +248,7 @@ function ProjectForm({
     mutationFn: () => {
       const fields: Record<string, string | number | null | undefined> = {};
       if (name !== project!.name) fields.name = name;
-      if (path.trim() && path.trim() !== project!.path) fields.path = path.trim();
+      if (normalizePath(path) !== normalizePath(project!.path)) fields.path = normalizePath(path);
       if (description !== (project!.description || '')) fields.description = description;
       if (defaultWebUrl !== (project!.default_web_url || '')) fields.default_web_url = defaultWebUrl || null;
       if (defaultModel !== (project!.default_model || '')) fields.default_model = defaultModel || null;
@@ -253,18 +261,15 @@ function ProjectForm({
       return api.projects.update(project!.id, fields as any);
     },
     onSuccess: async () => {
-      const savePath = project!.path;
-      // Skip config-file writes when the path changed: the loaded content came
-      // from the old folder, so writing it to the new one could clobber real files.
-      if (path.trim() === project!.path) {
-        try {
-          if (claudeMd !== initialClaudeMd) await api.files.write(`${savePath}/CLAUDE.md`, claudeMd);
-          if (agentsMd !== initialAgentsMd) await api.files.write(`${savePath}/AGENTS.md`, agentsMd);
-          if (settingsJson !== initialSettingsJson)
-            await api.files.write(`${savePath}/.claude/settings.json`, settingsJson);
-        } catch {
-          // best-effort file writes
-        }
+      // Write any edited files to the (possibly repointed) path, not the stale one.
+      const savePath = normalizePath(path) || project!.path;
+      try {
+        if (claudeMd !== initialClaudeMd) await api.files.write(`${savePath}/CLAUDE.md`, claudeMd);
+        if (agentsMd !== initialAgentsMd) await api.files.write(`${savePath}/AGENTS.md`, agentsMd);
+        if (settingsJson !== initialSettingsJson)
+          await api.files.write(`${savePath}/.claude/settings.json`, settingsJson);
+      } catch {
+        // best-effort file writes
       }
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       onSubmit();
@@ -280,6 +285,7 @@ function ProjectForm({
 
   const handleFolderSelect = (selectedPath: string, folderName: string) => {
     setPath(selectedPath);
+    // Don't auto-rename in edit mode, and never clobber a manually-set name.
     if (mode === 'add' && (!name || name === prevFolderName(path))) setName(folderName);
     setShowBrowser(false);
   };
@@ -325,6 +331,30 @@ function ProjectForm({
   const hasGitRepo = gitStatusData !== null && gitStatusData !== undefined;
   const hasRemote = hasGitRepo && !!gitStatusData?.remoteUrl;
 
+  // Warn-only validation for the working directory (add + edit). Never blocks save —
+  // the folder may be created later, so these are advisory, not errors.
+  const editingPath = normalizePath(path);
+  const projectsListQuery = useQuery({ queryKey: ['projects'], queryFn: () => api.projects.list() });
+  const otherProjects = (projectsListQuery.data?.projects || []).filter((p) => p.id !== project?.id);
+
+  const pathExistsQuery = useQuery({
+    queryKey: ['path-exists', editingPath],
+    queryFn: () => api.projects.browse(editingPath).then(() => true).catch(() => false),
+    enabled: !!editingPath,
+    retry: false,
+  });
+
+  const pathChanged = mode === 'edit' && editingPath !== normalizePath(project!.path);
+  const pathWarnings: string[] = [];
+  if (editingPath) {
+    if (!editingPath.startsWith('/')) pathWarnings.push('Path is not absolute — it should start with "/".');
+    if (pathExistsQuery.data === false) pathWarnings.push("This folder doesn't exist on disk yet.");
+    if (otherProjects.some((p) => normalizePath(p.path) === editingPath))
+      pathWarnings.push('Another project already points at this exact folder.');
+    else if (otherProjects.some((p) => normalizePath(p.path).startsWith(editingPath + '/')))
+      pathWarnings.push("This is a parent of another project's folder — sessions may open in the wrong place.");
+  }
+
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto" style={{ maxWidth: '1100px' }}>
@@ -348,18 +378,22 @@ function ProjectForm({
           style={{ background: 'var(--bg-secondary)', borderColor: 'var(--border)' }}
         >
           <div className="flex flex-col gap-4">
-            {/* Folder Path — editable in both add and edit mode */}
+            {/* Folder Path — editable in both add and edit mode.
+                In edit mode this repoints the project (DB only); files are NOT moved. */}
             <div>
-              <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>{mode === 'add' ? 'Folder Path' : 'Path'}</label>
+              <label className="block text-xs mb-1" style={{ color: 'var(--text-secondary)' }}>
+                {mode === 'add' ? 'Folder Path' : 'Working Directory'}
+              </label>
               <div className="flex gap-2">
                 <input
                   value={path}
                   onChange={(e) => {
                     const val = e.target.value;
+                    const folderName = prevFolderName(val);
                     setPath(val);
-                    if (mode === 'add' && (!name || name === prevFolderName(path))) {
-                      setName(prevFolderName(val));
-                    }
+                    // Only auto-fill the name from the folder while it still tracks the path
+                    // (don't clobber a manually-set name, and never in edit mode).
+                    if (mode === 'add' && (!name || name === prevFolderName(path))) setName(folderName);
                   }}
                   placeholder="/home/user/projects/myapp"
                   className="flex-1 px-4 py-2.5 rounded-lg border text-sm outline-none font-mono"
@@ -378,10 +412,21 @@ function ProjectForm({
                   Browse
                 </button>
               </div>
-              {mode === 'edit' && path.trim() !== project!.path && (
-                <p className="text-xs mt-1" style={{ color: 'var(--warning, #d97706)' }}>
-                  Le sessioni esistenti restano associate al progetto; le nuove partiranno dalla nuova cartella. CLAUDE.md/AGENTS.md/settings non vengono scritti quando cambi il path.
+              {mode === 'edit' && pathChanged && (
+                <p className="text-[10px] mt-1" style={{ color: 'var(--text-secondary)' }}>
+                  Repoints this project to a new folder. Files are not moved or renamed.
                 </p>
+              )}
+              {/* Warn-only validation — advisory, does not block saving */}
+              {pathWarnings.length > 0 && (
+                <div className="mt-1.5 flex flex-col gap-0.5">
+                  {pathWarnings.map((w) => (
+                    <p key={w} className="text-[10px] flex items-start gap-1" style={{ color: '#f59e0b' }}>
+                      <AlertTriangle className="w-3 h-3 mt-px shrink-0" />
+                      <span>{w}</span>
+                    </p>
+                  ))}
+                </div>
               )}
             </div>
 
@@ -885,7 +930,7 @@ function ProjectForm({
             <div className="flex items-center gap-3 pt-2">
               <button
                 onClick={handleSave}
-                disabled={isPending || !name || (mode === 'add' && !path)}
+                disabled={isPending || !name || !path.trim()}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-lg text-sm font-medium disabled:opacity-50"
                 style={{ background: 'var(--accent)', color: 'white' }}
               >
