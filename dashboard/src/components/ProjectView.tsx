@@ -24,6 +24,10 @@ interface ProjectViewProps {
   onFocusSessionHandled?: () => void;
   /** Report hidden (closed-tab) session IDs to parent */
   onHiddenSessionsChange?: (sessionIds: string[]) => void;
+  /** External request (tab context menu "Duplicate last session"): open the
+      launcher with the TaskModal pre-filled, then call onLaunchPrefillHandled */
+  launchPrefill?: { task?: string; model?: string; cliType?: 'claude' | 'codex' } | null;
+  onLaunchPrefillHandled?: () => void;
 }
 
 interface ExplorerInstance {
@@ -102,7 +106,7 @@ const sidebarButtons = [
   { id: 'git' as const, icon: GitBranch, title: 'Source Control' },
 ] as const;
 
-export function ProjectView({ projectId, projectPath, projectName: _projectName, active = true, terminalsSuspended = false, focusSessionId, onFocusSessionHandled, onHiddenSessionsChange }: ProjectViewProps) {
+export function ProjectView({ projectId, projectPath, projectName: _projectName, active = true, terminalsSuspended = false, focusSessionId, onFocusSessionHandled, onHiddenSessionsChange, launchPrefill, onLaunchPrefillHandled }: ProjectViewProps) {
   const queryClient = useQueryClient();
 
   // Fetch project data for SessionLauncher
@@ -241,7 +245,7 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   const [showLauncher, setShowLauncher] = useState(
     initialized?.showLauncher ?? true
   );
-  const [pendingLaunch, setPendingLaunch] = useState<{ mode: 'agent' | 'session'; cliType: 'claude' | 'codex' } | null>(null);
+  const [pendingLaunch, setPendingLaunch] = useState<{ mode: 'agent' | 'session'; cliType: 'claude' | 'codex'; task?: string; model?: string } | null>(null);
   // Quick-launch modal — overlay invoked by the "+" button next to the Home tab,
   // so users can spawn another session without navigating back to Home first.
   const [quickLaunchMode, setQuickLaunchMode] = useState<'session' | 'agent' | null>(null);
@@ -322,6 +326,23 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
       setExpandedTerminalId(null);
     }
   }, [active]);
+
+  // Consume a launch-prefill request from App (tab context menu → "Duplicate
+  // last session"): open the launcher with the TaskModal pre-filled.
+  useEffect(() => {
+    if (!launchPrefill) return;
+    setActiveMode('terminal');
+    setShowLauncher(true);
+    setShowAllTerminals(false);
+    setActiveWebPageId(null);
+    setPendingLaunch({
+      mode: 'session',
+      cliType: launchPrefill.cliType ?? 'claude',
+      task: launchPrefill.task,
+      model: launchPrefill.model,
+    });
+    onLaunchPrefillHandled?.();
+  }, [launchPrefill, onLaunchPrefillHandled]);
 
   // Track sessions the user explicitly closed so the sync effect doesn't re-add them
   const closedSessionIds = useRef(new Set<string>());
@@ -1406,6 +1427,8 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
                     onWebPageCreated={handleWebPageCreated}
                     pendingLaunchMode={pendingLaunch?.mode ?? null}
                     pendingLaunchCliType={pendingLaunch?.cliType}
+                    pendingLaunchTask={pendingLaunch?.task}
+                    pendingLaunchModel={pendingLaunch?.model}
                     onPendingLaunchHandled={() => setPendingLaunch(null)}
                   />
                 </div>

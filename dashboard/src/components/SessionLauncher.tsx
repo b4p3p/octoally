@@ -15,6 +15,10 @@ interface SessionLauncherProps {
   // The launcher calls onPendingLaunchHandled after consuming it.
   pendingLaunchMode?: LaunchMode;
   pendingLaunchCliType?: 'claude' | 'codex';
+  // Optional pre-fill for the TaskModal (tab context menu "Duplicate last
+  // session"): task text and model of the session being duplicated.
+  pendingLaunchTask?: string;
+  pendingLaunchModel?: string;
   onPendingLaunchHandled?: () => void;
 }
 
@@ -146,6 +150,8 @@ export function TaskModal({
   agents,
   codexReady,
   initialCliType,
+  initialTask,
+  initialModel,
   onClose,
   onLaunch,
 }: {
@@ -154,14 +160,20 @@ export function TaskModal({
   agents: RufloAgent[];
   codexReady: boolean;
   initialCliType?: 'claude' | 'codex';
+  // Pre-fill for "duplicate last session": task text and model.
+  initialTask?: string;
+  initialModel?: string;
   onClose: () => void;
   onLaunch: (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean, inheritMcp?: boolean) => void;
 }) {
-  const [task, setTask] = useState('');
+  const [task, setTask] = useState(initialTask ?? '');
   const [agentType, setAgentType] = useState(agents[0]?.name || 'coder');
   const [cliType, setCliType] = useState<'claude' | 'codex'>(initialCliType || 'claude');
-  const [sessionPrompt, setSessionPrompt] = useState<string | null>(null);
-  const [model, setModel] = useState<string>(project.default_model || '');
+  // A pre-filled task already embeds the project session prompt (it's the
+  // final task of the source session) — blank the override so the prompt
+  // isn't appended a second time at launch.
+  const [sessionPrompt, setSessionPrompt] = useState<string | null>(initialTask !== undefined ? '' : null);
+  const [model, setModel] = useState<string>(initialModel ?? project.default_model ?? '');
   const [rememberModel, setRememberModel] = useState(false);
   // Agent mode only: when true, launch Claude as a full session with the
   // agent persona injected as a prompt, so user MCP servers are available.
@@ -758,18 +770,24 @@ export function TaskModal({
   );
 }
 
-export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, pendingLaunchMode, pendingLaunchCliType, onPendingLaunchHandled }: SessionLauncherProps) {
+export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, pendingLaunchMode, pendingLaunchCliType, pendingLaunchTask, pendingLaunchModel, onPendingLaunchHandled }: SessionLauncherProps) {
   const [webUrl, setWebUrl] = useState('');
   const [launchMode, setLaunchMode] = useState<LaunchMode>(pendingLaunchMode ?? null);
+  // Pre-fill captured from the pending-launch props when consumed, so it
+  // survives the parent clearing the pending state right after.
+  const [prefill, setPrefill] = useState<{ task?: string; model?: string; cliType?: 'claude' | 'codex' } | null>(
+    pendingLaunchMode ? { task: pendingLaunchTask, model: pendingLaunchModel, cliType: pendingLaunchCliType } : null
+  );
   const queryClient = useQueryClient();
 
   // Consume external trigger to open TaskModal (e.g. project-card quick-launch).
   useEffect(() => {
     if (pendingLaunchMode) {
+      setPrefill({ task: pendingLaunchTask, model: pendingLaunchModel, cliType: pendingLaunchCliType });
       setLaunchMode(pendingLaunchMode);
       onPendingLaunchHandled?.();
     }
-  }, [pendingLaunchMode, onPendingLaunchHandled]);
+  }, [pendingLaunchMode, pendingLaunchCliType, pendingLaunchTask, pendingLaunchModel, onPendingLaunchHandled]);
 
   // Fetch available agent types for this project (reads .claude/agents/ — standard Claude Code feature)
   const { data: agentsData } = useQuery({
@@ -797,6 +815,7 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
       queryClient.invalidateQueries({ queryKey: ['sessions'] });
       if (vars.rememberModel) queryClient.invalidateQueries({ queryKey: ['projects'] });
       setLaunchMode(null);
+      setPrefill(null);
       if (data.session?.id) {
         onSessionCreated(data.session.id, undefined, 'session');
       }
@@ -1049,8 +1068,10 @@ export function SessionLauncher({ project, onSessionCreated, onWebPageCreated, p
             project={project}
             agents={agents}
             codexReady={true}
-            initialCliType={pendingLaunchCliType}
-            onClose={() => setLaunchMode(null)}
+            initialCliType={prefill?.cliType ?? pendingLaunchCliType}
+            initialTask={prefill?.task}
+            initialModel={prefill?.model}
+            onClose={() => { setLaunchMode(null); setPrefill(null); }}
             onLaunch={handleLaunch}
           />
         )}

@@ -5,7 +5,7 @@ import { connectStream, useStreamStore, setQueryClient } from './lib/websocket';
 import { api } from './lib/api';
 import { ProjectDashboard } from './components/ProjectDashboard';
 import { ProjectView, cleanupProjectStorage } from './components/ProjectView';
-import { X, LayoutGrid, FolderOpen, Monitor, Settings, ArrowUpCircle } from 'lucide-react';
+import { X, LayoutGrid, FolderOpen, Monitor, Settings, ArrowUpCircle, CopyPlus } from 'lucide-react';
 import { isDesktop, isElectron, getDesktopVersion } from './lib/tauri';
 import { AgentGuideButton } from './components/AgentGuide';
 import { CloseTabModal } from './components/CloseTabModal';
@@ -371,6 +371,38 @@ function Dashboard() {
     }
   }
 
+  // Project-tab context menu (right-click) + one-shot launcher prefill for
+  // "Duplicate last session" — consumed by the target ProjectView.
+  const [tabMenu, setTabMenu] = useState<{ projectId: string; x: number; y: number } | null>(null);
+  const [launchPrefill, setLaunchPrefill] = useState<{ projectId: string; task?: string; model?: string; cliType?: 'claude' | 'codex' } | null>(null);
+
+  // Close the tab context menu on Escape
+  useEffect(() => {
+    if (!tabMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTabMenu(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tabMenu]);
+
+  const duplicateLastSession = useCallback((projectId: string) => {
+    setTabMenu(null);
+    // Most recent plain session of this project — terminals and agents excluded.
+    // The list from the API includes the 50 most recent inactive sessions too.
+    const source = sessions
+      .filter((s) => s.project_id === projectId && s.task !== 'Terminal' && !s.task.startsWith('Agent ('))
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
+    setLaunchPrefill({
+      projectId,
+      task: source?.task,
+      model: source?.model || undefined,
+      cliType: source?.cli_type,
+    });
+    setActiveTab(`project-${projectId}`);
+    dismissActiveTerminals();
+  }, [sessions, dismissActiveTerminals]);
+
   const [confirmClose, setConfirmClose] = useState<{ projectId: string; count: number } | null>(null);
 
   const closeProjectTab = useCallback(async (projectId: string) => {
@@ -606,6 +638,10 @@ function Dashboard() {
               key={tab.projectId}
               className="flex items-center gap-1 rounded-md shrink-0 group"
               style={{ background: isActive ? 'var(--bg-tertiary)' : 'transparent' }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setTabMenu({ projectId: tab.projectId, x: e.clientX, y: e.clientY });
+              }}
             >
               <button
                 onClick={() => { setActiveTab(tabId); dismissActiveTerminals(); }}
@@ -692,12 +728,44 @@ function Dashboard() {
                   focusSessionId={isActive ? focusSessionId : null}
                   onFocusSessionHandled={() => setFocusSessionId(null)}
                   onHiddenSessionsChange={getHiddenSessionsCallback(tab.projectId)}
+                  launchPrefill={launchPrefill?.projectId === tab.projectId ? launchPrefill : null}
+                  onLaunchPrefillHandled={() => setLaunchPrefill(null)}
                 />
               )}
             </div>
           );
         })}
       </main>
+
+      {/* Project-tab context menu */}
+      {tabMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setTabMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setTabMenu(null); }}
+          />
+          <div
+            className="fixed z-50 rounded-lg border shadow-xl overflow-hidden py-1"
+            style={{
+              background: 'var(--bg-secondary)',
+              borderColor: 'var(--border)',
+              left: Math.min(tabMenu.x, window.innerWidth - 200),
+              top: tabMenu.y,
+              minWidth: 180,
+            }}
+          >
+            <button
+              onClick={() => duplicateLastSession(tabMenu.projectId)}
+              className="flex items-center gap-2 w-full px-3 py-1.5 text-xs transition-colors hover:bg-white/5"
+              style={{ color: 'var(--text-primary)' }}
+            >
+              <CopyPlus className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+              Duplicate last session
+            </button>
+          </div>
+        </>
+      )}
 
       {confirmClose && (
         <CloseTabModal
