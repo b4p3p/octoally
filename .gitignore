@@ -8,7 +8,10 @@ dist/
 *.db-wal
 .devcortex
 .devcortex-cli/
-.claude/
+# Le regole di Claude valgono per chiunque lavori qui, quindi stanno in git.
+# `.claude/*` e non `.claude/`: da una cartella esclusa git non ripesca nulla.
+.claude/*
+!.claude/rules/
 .claude-flow/
 .ruflo/
 .swarm/
