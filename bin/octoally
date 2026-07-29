@@ -155,6 +155,20 @@ _force_kill_port() {
   fi
 }
 
+# Roll the server log once it gets big. The server is started with `>>`, so
+# without this the file grows forever — nothing else rotates it. Keeps one
+# previous generation, so the pair never exceeds ~2x the threshold.
+_rotate_log() {
+  local log="$OCTOALLY_DIR/logs/octoally.log"
+  local max="${OCTOALLY_LOG_MAX_BYTES:-20971520}" # 20 MiB
+  [ -f "$log" ] || return 0
+  local size
+  size=$(wc -c < "$log" 2>/dev/null) || return 0
+  [ "$size" -gt "$max" ] || return 0
+  mv -f "$log" "${log}.1" 2>/dev/null || return 0
+  log_info "Rotated server log ($((size / 1024 / 1024))MB) to octoally.log.1"
+}
+
 cmd_start() {
   local port
   port=$(_resolve_server_port)
@@ -175,6 +189,7 @@ cmd_start() {
 
   log_info "Starting OctoAlly server..."
   mkdir -p "$OCTOALLY_DIR/logs"
+  _rotate_log
   cd "$OCTOALLY_DIR/server"
 
   # Native module guard: if native modules fail to load (e.g., Node version

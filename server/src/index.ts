@@ -52,11 +52,18 @@ setInterval(() => {
 
 async function start() {
   const app = Fastify({
+    // Per-request logging is off unless you ask for it: the dashboard polls
+    // /api/files continuously, and at 'info' Fastify writes two pretty-printed
+    // blocks per request into logs/octoally.log — tens of MB a day. Application
+    // logs (startup, errors, session events) are unaffected.
+    disableRequestLogging: !['debug', 'trace'].includes(config.logLevel),
     logger: {
       level: config.logLevel,
       transport: {
         target: 'pino-pretty',
-        options: { colorize: true },
+        // bin/octoally redirects stdout to the log file; colorizing there just
+        // writes ANSI escapes into it, bloating the file and breaking grep.
+        options: { colorize: process.stdout.isTTY === true },
       },
     },
   });
