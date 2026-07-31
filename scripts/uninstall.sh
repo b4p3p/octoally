@@ -5,7 +5,7 @@
 #
 # Usage:
 #   bash scripts/uninstall.sh
-#   curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/octoally/main/scripts/uninstall.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/b4p3p/octoally/main/scripts/uninstall.sh | bash
 #
 # Options:
 #   --keep-data    Keep ~/.octoally (database, projects, config)

@@ -56,6 +56,25 @@ fi
 CURRENT=$(node -e "console.log(require('./package.json').version)")
 echo "Current version: $CURRENT"
 
+# --- Repository coordinate ----------------------------------------------------
+# package.json is the single source of truth. Everything else derives from it,
+# except install.sh, which is fetched standalone and has to carry its own copy —
+# so that copy gets checked here, where a mismatch is still cheap to fix.
+
+REPO=$(node -p "((require('./package.json').repository||{}).url||'').replace(/^git\+/,'').replace(/^https:\/\/github\.com\//,'').replace(/\.git\$/,'')")
+if [ -z "$REPO" ]; then
+  echo "Error: package.json has no repository.url — releases would have no home." >&2
+  exit 1
+fi
+
+INSTALLER_REPO=$(sed -n 's/^GITHUB_REPO="\${OCTOALLY_GITHUB_REPO:-\(.*\)}"$/\1/p' scripts/install.sh | head -1)
+if [ "$INSTALLER_REPO" != "$REPO" ]; then
+  echo "Error: scripts/install.sh points at '$INSTALLER_REPO' but package.json says '$REPO'." >&2
+  echo "       Update the GITHUB_REPO default in scripts/install.sh (and its usage header)." >&2
+  exit 1
+fi
+echo "Repository: $REPO"
+
 # --- Resolve new version ------------------------------------------------------
 
 # Strip -alpha/-beta/-rc suffix for semver arithmetic, reattach after
@@ -181,7 +200,7 @@ else
   git push origin "v${NEW_VERSION}"
   echo ""
   echo "✓ v${NEW_VERSION} released — GitHub Actions workflow triggered"
-  echo "  https://github.com/ai-genius-automations/octoally/actions"
+  echo "  https://github.com/$REPO/actions"
 
   # --- npm publish flag (opt-in) -----------------------------------------------
   if [ "$NPM_PUBLISH" = true ]; then

@@ -54,10 +54,15 @@ cp -r "$ROOT_DIR/bin" "$STAGE_DIR/bin"
 chmod +x "$STAGE_DIR/bin/octoally"
 cp -r "$ROOT_DIR/scripts" "$STAGE_DIR/scripts"
 
-# Version metadata
+# Version metadata. "repo" carries the GitHub coordinate into the installed
+# tree: package.json is the single source of truth, and this is how the CLI and
+# the server learn which repository to check for updates — an install must
+# follow the repo it came from, not one hardcoded in three places.
+REPO=$(node -p "((require('$ROOT_DIR/package.json').repository||{}).url||'').replace(/^git\+/,'').replace(/^https:\/\/github\.com\//,'').replace(/\.git$/,'')")
 cat > "$STAGE_DIR/version.json" <<VJSON
 {
   "version": "$VERSION",
+  "repo": "$REPO",
   "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "node_version": "$(node -v)"
 }

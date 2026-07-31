@@ -25,7 +25,19 @@ if (process.env.__OCTOALLY_NPX_ACTIVE === "1") {
 }
 
 const INSTALL_DIR = process.env.OCTOALLY_INSTALL_DIR || join(homedir(), "octoally");
-const GITHUB_REPO = "ai-genius-automations/octoally";
+
+// Repository coordinate comes from our own package.json (repository.url), the
+// single source of truth — a fork publishing this package points its users at
+// its own releases without editing this file.
+function packageRepo() {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "package.json");
+    const url = JSON.parse(readFileSync(pkgPath, "utf8")).repository?.url || "";
+    return url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/)?.[1] || "";
+  } catch { return ""; }
+}
+
+const GITHUB_REPO = process.env.OCTOALLY_GITHUB_REPO || packageRepo();
 const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh`;
 const LOCAL_CLI = join(INSTALL_DIR, "bin", "octoally");
 

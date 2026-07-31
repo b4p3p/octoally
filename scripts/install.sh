@@ -11,7 +11,7 @@
 # run: claude --dangerously-skip-permissions
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/ai-genius-automations/octoally/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/b4p3p/octoally/main/scripts/install.sh | bash
 #   OCTOALLY_VERSION=0.1.0 bash install.sh
 #   OCTOALLY_INSTALL_DIR=/opt/octoally bash install.sh
 #
@@ -21,7 +21,11 @@
 set -euo pipefail
 
 INSTALL_DIR="${OCTOALLY_INSTALL_DIR:-${HIVECOMMAND_INSTALL_DIR:-$HOME/octoally}}"
-GITHUB_REPO="${OCTOALLY_GITHUB_REPO:-ai-genius-automations/octoally}"
+# The one place where the repository is spelled out: this script is fetched
+# standalone (curl | bash) and must know where to download from before anything
+# exists on disk, so it cannot read package.json like every other consumer does.
+# scripts/release.sh verifies this default still matches package.json.
+GITHUB_REPO="${OCTOALLY_GITHUB_REPO:-b4p3p/octoally}"
 VERSION="${OCTOALLY_VERSION:-latest}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 

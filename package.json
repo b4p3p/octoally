@@ -51,7 +51,7 @@
   "homepage": "https://octoally.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ai-genius-automations/octoally.git"
+    "url": "git+https://github.com/b4p3p/octoally.git"
   },
   "overrides": {
     "hono": ">=4.12.16",

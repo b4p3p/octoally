@@ -39,6 +39,31 @@ const tlog = (s: string) => { try { appendFileSync('/tmp/octoally-timing.log', `
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * GitHub coordinate (owner/name) this install should check for updates.
+ *
+ * Never hardcoded: package.json's repository.url is the single source of truth
+ * and build-archive.sh copies it into the version.json that ships in a release.
+ * Both files sit two levels above dist/ — version.json in an install tree,
+ * package.json in a dev checkout. Returns '' when neither resolves, which
+ * disables the update check instead of aiming it at the wrong repository.
+ */
+async function resolveGithubRepo(): Promise<string> {
+  if (process.env.OCTOALLY_GITHUB_REPO) return process.env.OCTOALLY_GITHUB_REPO;
+  const { readFileSync } = await import('fs');
+  try {
+    const meta = JSON.parse(readFileSync(resolve(__dirname, '../../version.json'), 'utf-8'));
+    if (meta.repo) return String(meta.repo);
+  } catch {}
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(__dirname, '../../package.json'), 'utf-8'));
+    const url: string = pkg.repository?.url || '';
+    const match = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+    if (match) return match[1];
+  } catch {}
+  return '';
+}
+
 // Event loop lag detector — logs when the event loop is blocked for >100ms
 let _lagLast = Date.now();
 setInterval(() => {
@@ -199,7 +224,16 @@ async function start() {
   // - stable: prefer newest non-prerelease; fall back to newest prerelease if no stable exists
   // - beta: newest prerelease
   // - alpha: newest release of any kind
-  const GITHUB_RELEASES_URL = 'https://api.github.com/repos/ai-genius-automations/octoally/releases?per_page=20';
+  // The repository is never hardcoded: package.json's repository.url is the
+  // single source of truth, build-archive.sh copies it into the version.json
+  // that ships in the release, and we read it back here — so an install checks
+  // the repository it came from. Dev checkouts have no version.json and fall
+  // back to the root package.json; if neither resolves, the check is disabled
+  // rather than pointed at someone else's releases.
+  const githubRepo = await resolveGithubRepo();
+  const GITHUB_RELEASES_URL = githubRepo
+    ? `https://api.github.com/repos/${githubRepo}/releases?per_page=20`
+    : '';
   const _versionCache = new Map<string, { version: string; name: string; url: string; prerelease: boolean; checkedAt: number }>();
 
   interface GitHubRelease {
@@ -211,6 +245,9 @@ async function start() {
   }
 
   app.get('/api/version-check', async (req, reply) => {
+    if (!GITHUB_RELEASES_URL) {
+      return reply.status(503).send({ error: 'Update source unknown (no repository coordinate)' });
+    }
     try {
       const channel = (req.query as Record<string, string>).channel || 'stable';
       const now = Date.now();

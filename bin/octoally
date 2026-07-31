@@ -382,7 +382,27 @@ cmd_restart() {
   cmd_start
 }
 
-GITHUB_REPO="ai-genius-automations/octoally"
+# GitHub coordinate (owner/name) used for update checks. It is never hardcoded
+# here: package.json's repository.url is the single source of truth, and
+# build-archive.sh copies it into the version.json that ships in the release,
+# so an install updates from the repository it actually came from. A dev
+# checkout has no version.json — there, read package.json directly.
+get_github_repo() {
+  if [ -n "${OCTOALLY_GITHUB_REPO:-}" ]; then
+    echo "$OCTOALLY_GITHUB_REPO"; return
+  fi
+  local repo=""
+  if [ -f "$VERSION_FILE" ]; then
+    repo=$(grep -o '"repo"[[:space:]]*:[[:space:]]*"[^"]*"' "$VERSION_FILE" 2>/dev/null \
+      | sed 's/.*"\([^"]*\)"$/\1/' || true)
+  fi
+  if [ -z "$repo" ] && [ -f "$OCTOALLY_DIR/package.json" ] && command -v node >/dev/null 2>&1; then
+    repo=$(node -p "((require('$OCTOALLY_DIR/package.json').repository||{}).url||'').replace(/^git\+/,'').replace(/^https:\/\/github\.com\//,'').replace(/\.git\$/,'')" 2>/dev/null || true)
+  fi
+  echo "$repo"
+}
+
+GITHUB_REPO="$(get_github_repo)"
 GITHUB_API_RELEASES="https://api.github.com/repos/$GITHUB_REPO/releases"
 
 # Get the user's configured channel (default: stable)
@@ -501,7 +521,12 @@ cmd_status() {
 }
 
 cmd_update() {
-  log_info "Checking for updates via GitHub..."
+  if [ -z "$GITHUB_REPO" ]; then
+    log_error "Unknown update source: no \"repo\" in version.json and no package.json to fall back to."
+    log_info "Reinstall from a release built with a current build-archive.sh, or set OCTOALLY_GITHUB_REPO."
+    exit 1
+  fi
+  log_info "Checking for updates via GitHub ($GITHUB_REPO)..."
 
   local local_version desktop_version
   local_version=$(get_local_version)
