@@ -1,13 +1,20 @@
 [Unit]
 Description=OctoAlly Orchestration Dashboard
 After=network.target
+# Give up after 5 failures in a minute and land in 'failed', which is visible.
+# Without a limit a broken unit stays 'activating' and retries every 5s for
+# weeks — that is how a service that could not exec node went unnoticed here.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=__USER__
 WorkingDirectory=__OCTOALLY_DIR__/server
-ExecStartPre=/bin/sh -c '__NODE_BIN__ -e "require(\'better-sqlite3\'); require(\'node-pty-prebuilt-multiarch\')" 2>/dev/null || "$(dirname __NODE_BIN__)/npm" rebuild better-sqlite3 node-pty-prebuilt-multiarch'
-ExecStart=__NODE_BIN__ dist/index.js
+# Exec through the CLI, not through a node path resolved at install time: the
+# CLI finds node at every start (so the unit survives node moving or being
+# replaced) and rebuilds the native modules when the Node ABI changed.
+ExecStart=__OCTOALLY_DIR__/bin/octoally run
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production

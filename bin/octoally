@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # OctoAlly CLI launcher
-# Usage: octoally [start|stop|restart|status|update|channel|logs|install-service|uninstall-service]
+# Usage: octoally [start|run|stop|restart|status|update|channel|logs|install-service|uninstall-service]
 
 set -euo pipefail
 
@@ -131,6 +131,111 @@ _port_in_use() {
   fi
 }
 
+# Directories that may hold a node binary when the inherited PATH has none.
+# Ordered by preference. Version managers come LAST — and are only ever
+# consulted by _ensure_node_on_path when no node is reachable at all — because
+# switching Node major behind the user's back is exactly what breaks the native
+# modules: better-sqlite3 and node-pty are compiled for one
+# NODE_MODULE_VERSION, and running them on a different one aborts at startup.
+_node_fallback_dirs() {
+  local home="${HOME:-}"
+  if [ -z "$home" ]; then
+    home="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6 || true)"
+  fi
+
+  # System locations desktop launchers and service managers often miss
+  echo "/usr/local/bin"
+  echo "/opt/homebrew/bin"
+  echo "/usr/bin"
+  [ -n "$home" ] && echo "$home/.local/bin"
+  [ -n "$home" ] || return 0
+
+  # nvm: the version the user made default first, the newest installed after
+  local nvm_dir="${NVM_DIR:-$home/.nvm}"
+  local versions_dir="$nvm_dir/versions/node"
+  if [ -d "$versions_dir" ]; then
+    if [ -f "$nvm_dir/alias/default" ]; then
+      local alias_val
+      alias_val="$(cat "$nvm_dir/alias/default" 2>/dev/null || true)"
+      [ -n "$alias_val" ] && echo "$versions_dir/v${alias_val#v}/bin"
+    fi
+    local newest
+    newest=$(ls -1 "$versions_dir" 2>/dev/null | sed -n 's/^v//p' \
+      | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+    [ -n "$newest" ] && echo "$versions_dir/v$newest/bin"
+  fi
+
+  # fnm
+  local fnm_dir="$home/.local/share/fnm/node-versions"
+  [ -d "$fnm_dir" ] || fnm_dir="$home/.fnm/node-versions"
+  if [ -d "$fnm_dir" ]; then
+    local fnm_newest
+    fnm_newest=$(ls -1 "$fnm_dir" 2>/dev/null | sed -n 's/^v//p' \
+      | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+    [ -n "$fnm_newest" ] && echo "$fnm_dir/v$fnm_newest/installation/bin"
+  fi
+
+  # volta
+  echo "$home/.volta/bin"
+}
+
+# Ensure `node` (and with it `npm`) is callable. A node already on PATH always
+# wins; the fallback list is only walked when there is none, which is the case
+# under systemd/launchd and desktop launchers with a bare environment.
+_ensure_node_on_path() {
+  if command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  local dir
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    if [ -x "$dir/node" ]; then
+      PATH="$dir:$PATH"
+      export PATH
+      log_info "Using node from $dir ($("$dir/node" -v 2>/dev/null || echo 'unknown'))"
+      return 0
+    fi
+  done <<EOF
+$(_node_fallback_dirs)
+EOF
+  log_error "No node binary found (PATH: $PATH)"
+  log_info "Install Node.js, or add its directory to PATH, then retry."
+  return 1
+}
+
+# Probe that really dlopen()s both native addons. Note the Database
+# instantiation: require('better-sqlite3') alone loads NOTHING native — the
+# .node file is opened lazily inside the constructor — so a require-only check
+# reports success on a mismatched ABI and the server then dies at startup.
+_native_modules_ok() {
+  (cd "$OCTOALLY_DIR/server" && node -e \
+    "new (require('better-sqlite3'))(':memory:').close(); require('node-pty-prebuilt-multiarch')" \
+    >/dev/null 2>&1)
+}
+
+# Rebuild the native modules when the Node running them is not the Node they
+# were built with (apt/brew/nvm upgrade, a different Node in a service PATH,
+# ...). Keeps the install working on any Node instead of pinning one version.
+_ensure_native_modules() {
+  if _native_modules_ok; then
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    log_error "Native modules need a rebuild for $(node -v 2>/dev/null || echo 'this Node'), but npm was not found"
+    return 1
+  fi
+  log_warn "Native modules built for another Node — rebuilding for $(node -v 2>/dev/null || echo 'current Node')..."
+  mkdir -p "$OCTOALLY_DIR/logs"
+  if npm rebuild --prefix "$OCTOALLY_DIR/server" better-sqlite3 node-pty-prebuilt-multiarch \
+      >> "$OCTOALLY_DIR/logs/octoally.log" 2>&1 && _native_modules_ok; then
+    log_ok "Rebuild complete"
+    return 0
+  fi
+  log_error "Rebuild failed — see $OCTOALLY_DIR/logs/octoally.log"
+  log_info "A compiler toolchain may be missing (build-essential + python3 on Linux, Xcode CLT on macOS)."
+  return 1
+}
+
 # Terminate all processes bound to the given TCP port: SIGTERM, wait, SIGKILL.
 # Safe to call when nothing is on the port (no-op).
 _force_kill_port() {
@@ -170,15 +275,21 @@ _rotate_log() {
 }
 
 cmd_start() {
-  local port
-  port=$(_resolve_server_port)
-
   if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
     log_warn "OctoAlly is already running (PID $(cat "$PID_FILE"))"
     return 0
   fi
   # Stale PID file — remove before starting
   [ -f "$PID_FILE" ] && rm -f "$PID_FILE"
+
+  # Resolve node and heal the native modules before anything reads the DB —
+  # _resolve_server_port falls back to better-sqlite3 when the sqlite3 CLI is
+  # absent, and a mismatched ABI would silently send it to the default port.
+  _ensure_node_on_path || exit 1
+  _ensure_native_modules || exit 1
+
+  local port
+  port=$(_resolve_server_port)
 
   # Port pre-flight: avoid silently EADDRINUSE-ing into the log file
   if _port_in_use "$port"; then
@@ -192,19 +303,6 @@ cmd_start() {
   _rotate_log
   cd "$OCTOALLY_DIR/server"
 
-  # Native module guard: if native modules fail to load (e.g., Node version
-  # changed since install via apt/brew/nvm, causing NODE_MODULE_VERSION mismatch),
-  # rebuild them against the current Node. Works on Linux and macOS.
-  if ! node -e "require('better-sqlite3'); require('node-pty-prebuilt-multiarch')" >/dev/null 2>&1; then
-    log_warn "Native module mismatch — rebuilding for current Node..."
-    if npm rebuild better-sqlite3 node-pty-prebuilt-multiarch >> "$OCTOALLY_DIR/logs/octoally.log" 2>&1; then
-      log_ok "Rebuild complete"
-    else
-      log_error "Rebuild failed — see $OCTOALLY_DIR/logs/octoally.log"
-      exit 1
-    fi
-  fi
-
   # Scrub NODE_OPTIONS: if octoally was launched from a shell with a
   # context-mode/claude-mem preload active, NODE_OPTIONS carries a per-PID
   # --require shim in /tmp that dies with that shell. Inheriting it makes the
@@ -215,6 +313,32 @@ cmd_start() {
   echo "$pid" > "$PID_FILE"
   log_ok "OctoAlly started (PID $pid)"
   log_info "Dashboard: http://localhost:${port}"
+}
+
+# Foreground mode — this is what the systemd unit and the launchd plist exec.
+# Going through the CLI (instead of a node path frozen into the unit at install
+# time) means node is resolved at every start, so the service survives the node
+# binary moving or being replaced, and inherits the native-module self-healing.
+# Output goes to stdout/stderr: journald on Linux, the plist log paths on macOS.
+cmd_run() {
+  _ensure_node_on_path || exit 1
+  _ensure_native_modules || exit 1
+
+  # Port pre-flight, as in cmd_start. Without it a server already started by
+  # `octoally start` (or by the desktop app) makes this exec die on EADDRINUSE
+  # with nothing in the journal but a stack trace, five seconds apart, forever.
+  local port
+  port=$(_resolve_server_port)
+  if _port_in_use "$port"; then
+    log_error "Port ${port} is already in use — another OctoAlly server is running."
+    log_info "Stop it first ('octoally stop'), then let the service own the port."
+    exit 1
+  fi
+
+  cd "$OCTOALLY_DIR/server"
+  log_info "Starting OctoAlly server in foreground..."
+  # See cmd_start for why NODE_OPTIONS is scrubbed.
+  exec env -u NODE_OPTIONS NODE_ENV=production node dist/index.js
 }
 
 cmd_stop() {
@@ -512,18 +636,38 @@ cmd_logs() {
   fi
 }
 
+# Decide how privileged steps will run, and SAY SO. Sets $SUDO to "sudo" or "".
+# Escalating quietly is how install-service used to behave: it let a redirect
+# fail with "Permission denied", retried through sudo, and — with credentials
+# still cached from an earlier command — succeeded without ever telling the
+# user it had just written to /etc as root.
+_require_root() {
+  local what="$1"
+  if [ "$(id -u)" = "0" ]; then
+    SUDO=""
+    return 0
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    log_error "$what needs root, and sudo is not available."
+    log_info "Re-run as root."
+    return 1
+  fi
+  SUDO="sudo"
+  log_warn "$what writes under /etc and needs root — running those steps with sudo."
+  return 0
+}
+
 cmd_install_service() {
   # Determine the real user (handles pkexec/sudo elevation)
   local real_user="${SUDO_USER:-${PKEXEC_UID:+$(id -un "$PKEXEC_UID")}}"
   real_user="${real_user:-$(whoami)}"
 
-  # Resolve the node binary path at install time — must be absolute since
-  # systemd/launchd run with minimal PATH. Respects nvm/fnm/volta/brew/etc.
-  local node_bin
-  node_bin="$(command -v node 2>/dev/null || echo /usr/bin/node)"
-  if [ ! -x "$node_bin" ]; then
-    log_error "Could not resolve node binary (tried: $node_bin)"
-    exit 1
+  # No node path is baked into the unit: it would freeze whatever `node`
+  # happened to resolve today, and a service pointing at a binary that later
+  # moves (distro node removed, nvm version pruned) fails with status=203/EXEC
+  # forever. The unit execs `octoally run`, which resolves node at every start.
+  if ! command -v node >/dev/null 2>&1; then
+    log_warn "No node on PATH right now — the service resolves it at start time, but check the install if it fails."
   fi
 
   if [ "$OS" = "linux" ]; then
@@ -534,16 +678,41 @@ cmd_install_service() {
       exit 1
     fi
     local target="/etc/systemd/system/octoally.service"
-    sed "s|__OCTOALLY_DIR__|$OCTOALLY_DIR|g; s|__USER__|$real_user|g; s|__NODE_BIN__|$node_bin|g" "$service_file" > "$target" 2>/dev/null \
-      || sed "s|__OCTOALLY_DIR__|$OCTOALLY_DIR|g; s|__USER__|$real_user|g; s|__NODE_BIN__|$node_bin|g" "$service_file" | sudo tee "$target" > /dev/null
-    if [ "$(id -u)" = "0" ]; then
-      systemctl daemon-reload
-      systemctl enable octoally
-      systemctl start octoally
-    else
-      sudo systemctl daemon-reload
-      sudo systemctl enable octoally
-      sudo systemctl start octoally
+    _require_root "Installing the systemd service" || exit 1
+
+    if ! sed "s|__OCTOALLY_DIR__|$OCTOALLY_DIR|g; s|__USER__|$real_user|g" "$service_file" \
+        | $SUDO tee "$target" > /dev/null; then
+      log_error "Could not write $target"
+      exit 1
+    fi
+
+    # Hand over the port: a server started by `octoally start` still holds it,
+    # and the service would restart-loop on EADDRINUSE forever.
+    if [ -f "$PID_FILE" ] || _port_in_use "$(_resolve_server_port)"; then
+      log_info "Handing the running server over to the service..."
+      cmd_stop
+    fi
+
+    if ! $SUDO systemctl daemon-reload || ! $SUDO systemctl enable octoally; then
+      log_error "Could not enable the service — see: systemctl status octoally"
+      exit 1
+    fi
+    if ! $SUDO systemctl start octoally; then
+      log_error "Service failed to start — see: journalctl -u octoally -n 50"
+      exit 1
+    fi
+    # `systemctl start` returns as soon as the process is forked, so it says
+    # nothing about a server that dies a second later. Wait for the port.
+    local port started=false
+    port=$(_resolve_server_port)
+    for _ in $(seq 1 20); do
+      if _port_in_use "$port"; then started=true; break; fi
+      sleep 0.5
+    done
+    if [ "$started" != true ]; then
+      log_error "Service started but nothing is listening on port ${port}."
+      log_info "See: journalctl -u octoally -n 50"
+      exit 1
     fi
     log_ok "Systemd service installed and started"
     log_info "Manage with: sudo systemctl {start|stop|restart|status} octoally"
@@ -555,10 +724,21 @@ cmd_install_service() {
       log_error "Plist file not found: $plist_file"
       exit 1
     fi
-    mkdir -p "$OCTOALLY_DIR/logs"
+    mkdir -p "$OCTOALLY_DIR/logs" "$HOME/Library/LaunchAgents"
     local target="$HOME/Library/LaunchAgents/com.aigenius.octoally.plist"
-    sed "s|__OCTOALLY_DIR__|$OCTOALLY_DIR|g; s|__USER__|$(whoami)|g; s|__NODE_BIN__|$node_bin|g" "$plist_file" > "$target"
-    launchctl load "$target"
+    if ! sed "s|__OCTOALLY_DIR__|$OCTOALLY_DIR|g; s|__USER__|$(whoami)|g" "$plist_file" > "$target"; then
+      log_error "Could not write $target"
+      exit 1
+    fi
+    # Same handover as on Linux: the agent cannot bind a port we still hold.
+    if [ -f "$PID_FILE" ] || _port_in_use "$(_resolve_server_port)"; then
+      log_info "Handing the running server over to the service..."
+      cmd_stop
+    fi
+    if ! launchctl load "$target"; then
+      log_error "launchctl could not load $target"
+      exit 1
+    fi
     log_ok "Launchd service installed and started"
     log_info "Manage with: launchctl {load|unload} $target"
 
@@ -570,23 +750,33 @@ cmd_install_service() {
 
 cmd_uninstall_service() {
   if [ "$OS" = "linux" ]; then
+    local target="/etc/systemd/system/octoally.service"
+    if [ ! -f "$target" ]; then
+      log_info "No systemd service installed"
+      return 0
+    fi
     log_info "Removing systemd service..."
-    if [ "$(id -u)" = "0" ]; then
-      systemctl stop octoally 2>/dev/null || true
-      systemctl disable octoally 2>/dev/null || true
-      rm -f /etc/systemd/system/octoally.service
-      systemctl daemon-reload
-    else
-      sudo systemctl stop octoally 2>/dev/null || true
-      sudo systemctl disable octoally 2>/dev/null || true
-      sudo rm -f /etc/systemd/system/octoally.service
-      sudo systemctl daemon-reload
+    _require_root "Removing the systemd service" || exit 1
+    $SUDO systemctl stop octoally 2>/dev/null || true
+    $SUDO systemctl disable octoally 2>/dev/null || true
+    $SUDO rm -f "$target"
+    $SUDO systemctl daemon-reload
+    # systemd keeps a failed unit in memory until it is reset; without this the
+    # unit lingers in `systemctl status` after its file is long gone.
+    $SUDO systemctl reset-failed octoally 2>/dev/null || true
+    if [ -f "$target" ]; then
+      log_error "Could not remove $target"
+      exit 1
     fi
     log_ok "Systemd service removed"
 
   elif [ "$OS" = "macos" ]; then
-    log_info "Removing launchd service..."
     local target="$HOME/Library/LaunchAgents/com.aigenius.octoally.plist"
+    if [ ! -f "$target" ]; then
+      log_info "No launchd service installed"
+      return 0
+    fi
+    log_info "Removing launchd service..."
     launchctl unload "$target" 2>/dev/null || true
     rm -f "$target"
     log_ok "Launchd service removed"
@@ -600,20 +790,22 @@ cmd_help() {
   echo ""
   echo "Commands:"
   echo "  start              Start the OctoAlly server"
+  echo "  run                Run the server in the foreground (used by the service)"
   echo "  stop               Stop the OctoAlly server"
   echo "  restart            Restart the OctoAlly server"
   echo "  status             Show server status, version, and channel info"
   echo "  update             Check for and apply updates from current channel"
   echo "  channel [name]     Show or switch release channel (stable/beta/canary)"
   echo "  logs               Show/follow server logs"
-  echo "  install-service    Install as a system service (systemd/launchd)"
-  echo "  uninstall-service  Remove the system service"
+  echo "  install-service    Install as a system service (systemd/launchd; needs root on Linux)"
+  echo "  uninstall-service  Remove the system service (needs root on Linux)"
   echo "  help               Show this help message"
 }
 
 # Main dispatch
 case "${1:-help}" in
   start)             cmd_start ;;
+  run)               cmd_run ;;
   stop)              cmd_stop ;;
   restart)           cmd_restart ;;
   status)            cmd_status ;;
