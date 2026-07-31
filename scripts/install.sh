@@ -15,6 +15,11 @@
 #   OCTOALLY_VERSION=0.1.0 bash install.sh
 #   OCTOALLY_INSTALL_DIR=/opt/octoally bash install.sh
 #
+# Run from a source checkout (bash scripts/install.sh) it installs the working
+# tree: it builds the archive locally instead of downloading a release, so a
+# clone with no releases published — or uncommitted work — installs in one
+# command. Set OCTOALLY_ARCHIVE_URL to force a release install instead.
+#
 # For private repos / pre-release testing:
 #   OCTOALLY_ARCHIVE_URL="https://example.com/octoally-v0.1.0.tar.gz" bash install.sh
 
@@ -377,13 +382,54 @@ if command -v xdg-icon-resource &>/dev/null; then
   xdg-icon-resource forceupdate 2>/dev/null || true
 fi
 
-# --- Step 2: Download release ------------------------------------------------
+# --- Step 2: Get the release payload -----------------------------------------
 
-log_step 2 "Downloading OctoAlly..."
+# Are we running from a source checkout rather than from `curl | bash`? Then the
+# payload is the working tree, not a published release: build it here. Piped
+# through curl, BASH_SOURCE is not a real path and this yields nothing; run from
+# an installed tree, server/src and dashboard/src are absent, so that is not a
+# checkout either. Both cases fall through to the download path below.
+detect_checkout_root() {
+  local self candidate
+  self="$(readlink -f "${BASH_SOURCE[0]:-}" 2>/dev/null || true)"
+  [ -n "$self" ] && [ -f "$self" ] || return 0
+  candidate="$(cd "$(dirname "$self")/.." 2>/dev/null && pwd)" || return 0
+  [ -f "$candidate/package.json" ] || return 0
+  [ -d "$candidate/server/src" ] || return 0
+  [ -d "$candidate/dashboard/src" ] || return 0
+  [ -f "$candidate/scripts/build-archive.sh" ] || return 0
+  echo "$candidate"
+}
 
 ARCHIVE_URL="${OCTOALLY_ARCHIVE_URL:-${HIVECOMMAND_ARCHIVE_URL:-}}"
+REPO_ROOT="$(detect_checkout_root)"
+
+if [ -n "$REPO_ROOT" ] && [ -z "$ARCHIVE_URL" ]; then
+  log_step 2 "Building OctoAlly from this checkout..."
+  log_info "Source: $REPO_ROOT"
+  VERSION=$(node -p "require('$REPO_ROOT/server/package.json').version")
+  # Build from a throwaway copy of the tree, never in place: build-archive.sh
+  # runs `npm ci --ignore-scripts`, which would wipe the checkout's node_modules
+  # and leave its native modules unbuilt — breaking `npm run dev` for someone
+  # who only wanted to install. Copy excludes node_modules, so this costs a few
+  # MB and the npm cache does the rest.
+  BUILD_COPY=$(mktemp -d)
+  trap 'rm -rf "$BUILD_COPY"' EXIT
+  (cd "$REPO_ROOT" && tar cf - --exclude=node_modules --exclude=.git --exclude='*.tar.gz' .) \
+    | (cd "$BUILD_COPY" && tar xf -)
+  if ! bash "$BUILD_COPY/scripts/build-archive.sh"; then
+    log_error "Local build failed — see the output above."
+    exit 1
+  fi
+  if [ ! -f "$BUILD_COPY/octoally-v${VERSION}.tar.gz" ]; then
+    log_error "Build produced no octoally-v${VERSION}.tar.gz"
+    exit 1
+  fi
+  ARCHIVE_URL="file://$BUILD_COPY/octoally-v${VERSION}.tar.gz"
+fi
 
 if [ -z "$ARCHIVE_URL" ]; then
+  log_step 2 "Downloading OctoAlly..."
   # Resolve version from GitHub Releases API
   if [ "$VERSION" = "latest" ]; then
     log_info "Fetching latest release from GitHub..."
@@ -420,11 +466,20 @@ if [ -z "$ARCHIVE_URL" ]; then
 fi
 
 TMPFILE=$(mktemp)
-log_info "Downloading $ARCHIVE_URL..."
-if ! curl -fSL "${AUTH_HEADER[@]}" -H "Accept: application/octet-stream" --progress-bar -o "$TMPFILE" "$ARCHIVE_URL" 2>&1; then
-  rm -f "$TMPFILE"
-  log_error "Download failed. Check the URL or version and try again."
-  exit 1
+if [[ "$ARCHIVE_URL" == file://* ]]; then
+  log_info "Using archive ${ARCHIVE_URL#file://}"
+  if ! cp "${ARCHIVE_URL#file://}" "$TMPFILE"; then
+    rm -f "$TMPFILE"
+    log_error "Cannot read ${ARCHIVE_URL#file://}"
+    exit 1
+  fi
+else
+  log_info "Downloading $ARCHIVE_URL..."
+  if ! curl -fSL "${AUTH_HEADER[@]}" -H "Accept: application/octet-stream" --progress-bar -o "$TMPFILE" "$ARCHIVE_URL" 2>&1; then
+    rm -f "$TMPFILE"
+    log_error "Download failed. Check the URL or version and try again."
+    exit 1
+  fi
 fi
 
 log_ok "Downloaded ($(du -h "$TMPFILE" | cut -f1))"
@@ -834,6 +889,39 @@ case "$OS" in
     DESKTOP_SUPPORTED=false
     ;;
 esac
+
+# From a checkout the desktop app comes from the working tree as well: use a
+# locally built artifact if there is one, offer to build it if there is not.
+# Only if neither happens do we fall through to the published release asset.
+if [ -z "$DESKTOP_URL" ] && [ -n "$REPO_ROOT" ] && [ "$DESKTOP_SUPPORTED" = true ]; then
+  if [ "$OS" = "Darwin" ]; then
+    DESKTOP_GLOB="$REPO_ROOT/desktop-electron/release/*.dmg"
+    DESKTOP_TARGET="dist:mac"
+  else
+    DESKTOP_GLOB="$REPO_ROOT/desktop-electron/release/*.deb"
+    DESKTOP_TARGET="dist:linux"
+  fi
+  LOCAL_DESKTOP=$(ls -t $DESKTOP_GLOB 2>/dev/null | head -1 || true)
+  if [ -z "$LOCAL_DESKTOP" ] && [ -e /dev/tty ]; then
+    echo ""
+    echo -n "  Build the desktop app from this checkout? Takes several minutes. [y/N]: "
+    read -r answer < /dev/tty 2>/dev/null || answer="n"
+    case "$answer" in
+      [yY]|[yY][eE][sS])
+        log_info "Building desktop app (electron-builder)..."
+        if (cd "$REPO_ROOT/desktop-electron" && npm ci && npm run "$DESKTOP_TARGET"); then
+          LOCAL_DESKTOP=$(ls -t $DESKTOP_GLOB 2>/dev/null | head -1 || true)
+        else
+          log_warn "Desktop build failed — continuing without it"
+        fi
+        ;;
+    esac
+  fi
+  if [ -n "$LOCAL_DESKTOP" ]; then
+    log_info "Desktop app from this checkout: $(basename "$LOCAL_DESKTOP")"
+    DESKTOP_URL="file://$LOCAL_DESKTOP"
+  fi
+fi
 
 if [ -z "$DESKTOP_URL" ] && [ -n "$DESKTOP_FILE" ]; then
   # Try CDN URL first (fast for public repos)
