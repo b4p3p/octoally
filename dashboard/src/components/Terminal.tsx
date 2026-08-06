@@ -101,6 +101,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   // Expose connect/disconnect so the suspension effect can control it
   const connectFnRef = useRef<(() => void) | null>(null);
   const disconnectFnRef = useRef<(() => void) | null>(null);
+  // Non-destructive refit (see the octoally:refit-terminal handler).
+  const softRefitRef = useRef<(() => void) | null>(null);
   const isSuspendedRef = useRef(suspended);
   const passiveResizeRef = useRef(passiveResize);
   passiveResizeRef.current = passiveResize;
@@ -133,10 +135,16 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   const codexRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   isSuspendedRef.current = suspended;
 
-  // Hard refresh — the dedicated "screen is messed up, fix it" path. Always
-  // clears the xterm buffer first so stale stacked renders are discarded,
-  // then forces the CLI to redraw into the clean buffer. Intentionally heavier
-  // than the passive refit that tab switches / visibility changes use.
+  // Hard refresh — the dedicated "screen is messed up, fix it" path, driven by
+  // the refresh button and the voice command. It rebuilds the whole buffer from
+  // a server-side source of truth (tmux capture-pane, or a reconnect replay),
+  // which is why it must never be used as a routine post-layout refit: use
+  // softRefit (octoally:refit-terminal) for that.
+  //
+  // The buffer is only ever cleared together with the content that replaces it:
+  // both the capture and the replay arrive prefixed with ESC[H ESC[2J ESC[3J,
+  // so a local term.reset() would only add a window in which the scrollback is
+  // gone and nothing has arrived yet.
   const hardRefresh = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
@@ -167,21 +175,22 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     }
 
     if (hideCursorRef.current) {
-      // Claude session/agent: reset first to clear stacked renders.
-      term.reset();
+      // Claude session/agent: ask the server for a capture-pane snapshot. It
+      // carries the WHOLE tmux history rendered at the current geometry, so the
+      // conversation survives the refresh. (Resetting locally and SIGWINCH-ing
+      // the CLI instead would repaint only the current screen and drop every
+      // scrolled-off line — that was the "refresh eats the conversation" bug.)
       if (isControllerRef.current) {
-        // Controller owns the PTY: SIGWINCH-toggle so Claude redraws clean.
-        const cols = term.cols;
-        const rows = term.rows;
-        w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
+        // Controller owns the PTY: make sure the pane matches our size first,
+        // then capture — a capture taken mid-reflow renders at the old width.
+        w.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
         setTimeout(() => {
           if (w.readyState !== WebSocket.OPEN) return;
-          w.send(JSON.stringify({ type: 'resize', cols, rows }));
+          w.send(JSON.stringify({ type: 'refresh' }));
         }, 100);
       } else {
-        // Viewer: the server ignores its resize, so a SIGWINCH toggle would
-        // just blank the screen. Ask for a capture-pane snapshot at the
-        // current PTY geometry instead, then rescale.
+        // Viewer: the server ignores its resize, so just capture at the current
+        // PTY geometry and rescale.
         w.send(JSON.stringify({ type: 'refresh' }));
         applyScaleRef.current?.();
       }
@@ -653,24 +662,17 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
         if (!passiveResizeRef.current) {
           const w = wsRef.current;
           if (w && w.readyState === WebSocket.OPEN) {
+            // One resize, nothing else. The geometry really changed, so tmux
+            // SIGWINCHes the CLI and it redraws on its own — the cols-1/cols
+            // toggle we used to add here only bought two EXTRA full repaints,
+            // and every repaint that lands while xterm has just pulled lines
+            // out of the scrollback (which is what growing a card does)
+            // overwrites them for good.
             w.send(JSON.stringify({
               type: 'resize',
               cols: term.cols,
               rows: term.rows,
             }));
-            // Force PTY redraw via SIGWINCH toggle
-            const cols = term.cols;
-            const rows = term.rows;
-            setTimeout(() => {
-              if (w.readyState === WebSocket.OPEN) {
-                w.send(JSON.stringify({ type: 'resize', cols: cols - 1, rows }));
-                setTimeout(() => {
-                  if (w.readyState === WebSocket.OPEN) {
-                    w.send(JSON.stringify({ type: 'resize', cols, rows }));
-                  }
-                }, 50);
-              }
-            }, 50);
           } else {
             // WS not open yet — send when it connects
             pendingResize = true;
@@ -700,9 +702,16 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       }
 
       if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(doResize, 100);
+      // Longer than the 200ms card height transition in the Active Sessions
+      // grid: a shorter debounce resizes the PTY at intermediate heights too,
+      // and each of those redraws costs scrollback.
+      resizeTimer = setTimeout(doResize, 250);
     });
     resizeObserver.observe(containerRef.current);
+
+    // Layout-driven refit, used by the grid pulses (see the
+    // octoally:refit-terminal handler). Same path as a container resize.
+    softRefitRef.current = doResize;
 
     // The container observer above only fires when the CARD changes size. A
     // viewer's render ALSO changes size when the server-owned PTY geometry
@@ -721,6 +730,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       unsubscribeServerAlive();
       connectFnRef.current = null;
       disconnectFnRef.current = null;
+      softRefitRef.current = null;
       if (rafId !== null) cancelAnimationFrame(rafId);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       if (resizeTimer) clearTimeout(resizeTimer);
@@ -1011,6 +1021,24 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     window.addEventListener('octoally:refresh-terminal', handler);
     return () => window.removeEventListener('octoally:refresh-terminal', handler);
   }, [sessionId, hardRefresh]);
+
+  // Layout refit — emitted by the views that mount a terminal into a new box
+  // (grid mount, restore from the minimized tray, single↔grid switch), where the
+  // terminal first renders before the layout has settled and needs to re-fit.
+  //
+  // Deliberately NOT octoally:refresh-terminal: a refit must never touch the
+  // buffer. Those views used to fire the hard refresh, which reset the terminal
+  // half a second after the server had replayed the whole session into it —
+  // every card lost its scrollback on entering the grid.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { sessionId: targetId } = (e as CustomEvent).detail;
+      if (targetId !== sessionId) return;
+      softRefitRef.current?.();
+    };
+    window.addEventListener('octoally:refit-terminal', handler);
+    return () => window.removeEventListener('octoally:refit-terminal', handler);
+  }, [sessionId]);
 
   // Focus terminal on demand (e.g. switching from grid to single view)
   useEffect(() => {

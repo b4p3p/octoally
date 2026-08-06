@@ -936,17 +936,17 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
 
   // Force terminal refit on grid mount — terminals were fitted to single-view
   // full width and need to refit to the narrower grid card width.
-  // Dispatch refresh-terminal event for each terminal after layout settles.
+  // Refit (not refresh): resetting the buffers here would drop the scrollback.
   useEffect(() => {
     if (!gridMode) { setGridMounted(false); setGridShowAll(false); return; }
     const t1 = setTimeout(() => {
       setGridMounted(true);
     }, 100);
     const t2 = setTimeout(() => setGridMounted(false), 250);
-    // Trigger refresh after layout is fully settled — same as clicking refresh button
+    // Trigger the refit once the layout is fully settled
     const t3 = setTimeout(() => {
       for (const term of terminalInstances) {
-        window.dispatchEvent(new CustomEvent('octoally:refresh-terminal', {
+        window.dispatchEvent(new CustomEvent('octoally:refit-terminal', {
           detail: { sessionId: term.id },
         }));
       }

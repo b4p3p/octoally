@@ -196,7 +196,7 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
 
   // Force terminal redraw on mount — terminals render before the grid is laid out,
   // so nudge cardHeight by ±1px after paint to trigger ResizeObserver in each Terminal,
-  // then dispatch refresh-terminal at 500ms for reliable refit on all machines
+  // then dispatch refit-terminal at 500ms for reliable refit on all machines
   const [mounted, setMounted] = useState(false);
   const refreshedRef = useRef(false);
   useEffect(() => {
@@ -297,19 +297,21 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
     setFocusedSessionId(sessionId);
     // Force a refit once the card has had a frame to lay out
     setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('octoally:refresh-terminal', {
+      window.dispatchEvent(new CustomEvent('octoally:refit-terminal', {
         detail: { sessionId },
       }));
     }, 50);
   }, []);
 
-  // Dispatch refresh-terminal for all cards once after mount for reliable refit
+  // Refit every card once after mount, when the grid layout has settled.
+  // MUST be refit and not refresh: the terminals have just been replayed by the
+  // server, and a refresh would reset their buffers and throw that away.
   useEffect(() => {
     if (cards.length === 0 || refreshedRef.current) return;
     refreshedRef.current = true;
     const t = setTimeout(() => {
       for (const { session } of cards) {
-        window.dispatchEvent(new CustomEvent('octoally:refresh-terminal', {
+        window.dispatchEvent(new CustomEvent('octoally:refit-terminal', {
           detail: { sessionId: session.id },
         }));
       }
