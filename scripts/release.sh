@@ -206,7 +206,11 @@ else
   if [ "$NPM_PUBLISH" = true ]; then
     echo ""
     echo "Setting NPM_PUBLISH flag for GitHub Actions..."
-    gh variable set NPM_PUBLISH --body "true"
+    # --repo is not optional: this repository is a fork, and gh resolves an
+    # unqualified command to the PARENT repo — so the flag would be aimed at
+    # upstream (which just answers 403) instead of at us. $REPO comes from
+    # package.json, the same coordinate the release itself is pushed to.
+    gh variable set NPM_PUBLISH --repo "$REPO" --body "true"
     echo "✓ npm publish will run after the release workflow completes"
   fi
 fi
