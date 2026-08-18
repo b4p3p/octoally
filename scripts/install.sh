@@ -116,14 +116,18 @@ if ! command -v node &>/dev/null; then
   NEED_NODE=true
 else
   NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
-  if [ "$NODE_MAJOR" -lt 20 ]; then
+  # 22, not 20: better-sqlite3 declares "engines": { "node": ">=22" } and on an
+  # older Node it segfaults inside the Database constructor instead of failing
+  # to load, which reads as a mystery crash at server start. Keep in sync with
+  # server/package.json and OCTOALLY_MIN_NODE_MAJOR in bin/octoally.
+  if [ "$NODE_MAJOR" -lt 22 ]; then
     NEED_NODE=true
-    log_warn "Node.js $NODE_MAJOR found but 20+ is required"
+    log_warn "Node.js $NODE_MAJOR found but 22+ is required"
   fi
 fi
 
 if [ "$NEED_NODE" = true ]; then
-  prompt_install "Node.js 20+" "Install from: https://nodejs.org"
+  prompt_install "Node.js 22+" "Install from: https://nodejs.org"
   log_info "Installing Node.js 22..."
   case "$OS" in
     Linux*)
@@ -694,19 +698,36 @@ fi
 # working directory may no longer exist (causes npm "uv_cwd" ENOENT).
 cd "$INSTALL_DIR" || cd /
 log_info "Installing server dependencies..."
-if ! npm install --omit=dev --prefix "$INSTALL_DIR/server" 2>&1; then
-  # On Node 22+, node-gyp 11.x has a known post-build ENOENT on
-  # `build/node_gyp_bins` that exits non-zero even when the native module
-  # actually built successfully. If better-sqlite3 and node-pty load, the
-  # install is functionally complete — accept it and continue.
-  if (cd "$INSTALL_DIR/server" \
-       && node -e "require('better-sqlite3'); require('node-pty-prebuilt-multiarch')") >/dev/null 2>&1; then
-    log_warn "npm install exited non-zero, but native modules load — continuing"
-  else
-    log_error "npm install failed — see errors above"
+NPM_INSTALL_OK=true
+npm install --omit=dev --prefix "$INSTALL_DIR/server" 2>&1 || NPM_INSTALL_OK=false
+
+# Judge the install by loading the native modules, never by npm's exit status,
+# because that status lies in both directions:
+#
+#   - non-zero on a build that worked: node-gyp 11.x has a known post-build
+#     ENOENT on `build/node_gyp_bins` under Node 22+;
+#   - zero on a tree that cannot run: npm reports the packages it placed, not
+#     whether their addons load under the Node about to use them — an install
+#     carried out by a different Node leaves binaries for the wrong ABI and a
+#     perfectly clean npm log.
+#
+# Two details in the probe itself: better-sqlite3 has to be INSTANTIATED
+# (require() alone loads nothing native — the .node is opened lazily inside the
+# Database constructor), and the verdict comes from a sentinel written before
+# teardown, because these addons can abort while exiting even when healthy.
+NATIVE_PROBE=$( (cd "$INSTALL_DIR/server" && node -e \
+  "new (require('better-sqlite3'))(':memory:').close(); require('node-pty-prebuilt-multiarch'); require('fs').writeSync(1, '__OA_OK__')" \
+  2>/dev/null) || true )
+case "$NATIVE_PROBE" in
+  *__OA_OK__*)
+    [ "$NPM_INSTALL_OK" = true ] || log_warn "npm install exited non-zero, but native modules load — continuing"
+    ;;
+  *)
+    log_error "Native modules (better-sqlite3, node-pty) are not usable — see errors above"
+    log_info "Check that this Node (${NODE_VER}) is the one that will run the server, and that a compiler toolchain is present."
     exit 1
-  fi
-fi
+    ;;
+esac
 
 log_ok "OctoAlly v${VERSION} installed to $INSTALL_DIR"
 
@@ -901,16 +922,31 @@ if [ -z "$DESKTOP_URL" ] && [ -n "$REPO_ROOT" ] && [ "$DESKTOP_SUPPORTED" = true
     DESKTOP_GLOB="$REPO_ROOT/desktop-electron/release/*.deb"
     DESKTOP_TARGET="dist:linux"
   fi
-  LOCAL_DESKTOP=$(ls -t $DESKTOP_GLOB 2>/dev/null | head -1 || true)
+  # Only an artifact built for the version being installed will do. Taking the
+  # newest one in release/ instead reinstalls a stale desktop app without a
+  # word: that directory outlives the source it was built from, so a checkout
+  # bumped to a new version still holds the previous build.
+  DESKTOP_BUILT="$REPO_ROOT/desktop-electron/release/$DESKTOP_FILE"
+  LOCAL_DESKTOP=""
+  [ -f "$DESKTOP_BUILT" ] && LOCAL_DESKTOP="$DESKTOP_BUILT"
+  if [ -z "$LOCAL_DESKTOP" ]; then
+    STALE_DESKTOP=$(ls -t $DESKTOP_GLOB 2>/dev/null | head -1 || true)
+    [ -n "$STALE_DESKTOP" ] && \
+      log_warn "Ignoring $(basename "$STALE_DESKTOP") in desktop-electron/release — not a v${VERSION} build"
+  fi
   if [ -z "$LOCAL_DESKTOP" ] && [ -e /dev/tty ]; then
     echo ""
-    echo -n "  Build the desktop app from this checkout? Takes several minutes. [y/N]: "
+    echo -n "  Build the desktop app v${VERSION} from this checkout? Takes several minutes. [y/N]: "
     read -r answer < /dev/tty 2>/dev/null || answer="n"
     case "$answer" in
       [yY]|[yY][eE][sS])
         log_info "Building desktop app (electron-builder)..."
         if (cd "$REPO_ROOT/desktop-electron" && npm ci && npm run "$DESKTOP_TARGET"); then
-          LOCAL_DESKTOP=$(ls -t $DESKTOP_GLOB 2>/dev/null | head -1 || true)
+          if [ -f "$DESKTOP_BUILT" ]; then
+            LOCAL_DESKTOP="$DESKTOP_BUILT"
+          else
+            log_warn "Build produced no $DESKTOP_FILE — continuing without it"
+          fi
         else
           log_warn "Desktop build failed — continuing without it"
         fi

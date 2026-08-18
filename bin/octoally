@@ -131,12 +131,44 @@ _port_in_use() {
   fi
 }
 
-# Directories that may hold a node binary when the inherited PATH has none.
-# Ordered by preference. Version managers come LAST — and are only ever
-# consulted by _ensure_node_on_path when no node is reachable at all — because
-# switching Node major behind the user's back is exactly what breaks the native
-# modules: better-sqlite3 and node-pty are compiled for one
-# NODE_MODULE_VERSION, and running them on a different one aborts at startup.
+# Lowest Node major that can run the server; mirrors "engines.node" in
+# server/package.json. Not cosmetic: better-sqlite3 declares >=22 and on an
+# older Node it does not fail politely — it SEGFAULTS inside the Database
+# constructor, which the probes below can only report as "failed to load".
+OCTOALLY_MIN_NODE_MAJOR=22
+
+# Set by _rebuild_module: true when npm warned that some install scripts are
+# not covered by the "allowScripts" allowlist (npm >= 11.5).
+_rebuild_gated_scripts=false
+
+# Major version of a node binary. Empty when it cannot be run at all, so the
+# callers can tell "too old" apart from "not there".
+_node_major() {
+  local bin="${1:-}" v=""
+  if [ -n "$bin" ]; then
+    v="$("$bin" -v 2>/dev/null || true)"
+  fi
+  case "$v" in
+    v[0-9]*) printf '%s\n' "${v#v}" | cut -d. -f1 ;;
+    *)       printf '' ;;
+  esac
+}
+
+# True when this node binary is new enough to run the server.
+_node_supported() {
+  local major
+  major="$(_node_major "${1:-}")"
+  [ -n "$major" ] || return 1
+  [ "$major" -ge "$OCTOALLY_MIN_NODE_MAJOR" ]
+}
+
+# Directories that may hold a node binary when the inherited PATH has none or
+# has one too old to run us. Ordered by preference. Version managers come LAST
+# — and are only ever consulted by _ensure_node_on_path when the PATH cannot
+# supply a usable node — because switching Node major behind the user's back is
+# exactly what breaks the native modules: better-sqlite3 and node-pty are
+# compiled for one NODE_MODULE_VERSION, and running them on a different one
+# aborts at startup.
 _node_fallback_dirs() {
   local home="${HOME:-}"
   if [ -z "$home" ]; then
@@ -179,61 +211,208 @@ _node_fallback_dirs() {
   echo "$home/.volta/bin"
 }
 
-# Ensure `node` (and with it `npm`) is callable. A node already on PATH always
-# wins; the fallback list is only walked when there is none, which is the case
-# under systemd/launchd and desktop launchers with a bare environment.
+# Ensure `node` (and with it `npm`) is callable AND new enough to run the
+# server. A node already on PATH wins whenever it qualifies — switching Node
+# major behind the user's back is what makes the native modules unloadable —
+# but one BELOW the minimum is not a runtime worth keeping: it cannot start the
+# server at all, so the fallback list is walked for one that can.
+#
+# That distinction is the whole point. A desktop launcher hands us the bare
+# session environment: no nvm, and the distro's own node on PATH (18.x on
+# Ubuntu 24.04). "First node on PATH wins" picked it, better-sqlite3 segfaulted
+# before the server ever listened, and the app came up as a blank window.
 _ensure_node_on_path() {
-  if command -v node >/dev/null 2>&1; then
+  local current current_major
+  current="$(command -v node 2>/dev/null || true)"
+  if [ -n "$current" ] && _node_supported "$current"; then
     return 0
   fi
+  current_major="$(_node_major "$current")"
+
   local dir
   while IFS= read -r dir; do
     [ -n "$dir" ] || continue
-    if [ -x "$dir/node" ]; then
-      PATH="$dir:$PATH"
-      export PATH
-      log_info "Using node from $dir ($("$dir/node" -v 2>/dev/null || echo 'unknown'))"
-      return 0
+    [ -x "$dir/node" ] || continue
+    _node_supported "$dir/node" || continue
+    PATH="$dir:$PATH"
+    export PATH
+    if [ -n "$current_major" ]; then
+      log_warn "node on PATH is v${current_major}.x — OctoAlly needs Node ${OCTOALLY_MIN_NODE_MAJOR}+"
+      _log_file "PATH node v${current_major}.x is below the required ${OCTOALLY_MIN_NODE_MAJOR} — using $dir/node instead"
     fi
+    log_info "Using node from $dir ($("$dir/node" -v 2>/dev/null || echo 'unknown'))"
+    return 0
   done <<EOF
 $(_node_fallback_dirs)
 EOF
-  log_error "No node binary found (PATH: $PATH)"
-  log_info "Install Node.js, or add its directory to PATH, then retry."
+
+  if [ -n "$current_major" ]; then
+    log_error "node on PATH is v${current_major}.x and no Node ${OCTOALLY_MIN_NODE_MAJOR}+ was found"
+    _log_file "Only Node v${current_major}.x available, need ${OCTOALLY_MIN_NODE_MAJOR}+ — server NOT started."
+  else
+    log_error "No node binary found (PATH: $PATH)"
+    _log_file "No node binary found — server NOT started."
+  fi
+  log_info "Install Node.js ${OCTOALLY_MIN_NODE_MAJOR}+, or add its directory to PATH, then retry."
   return 1
 }
 
-# Probe that really dlopen()s both native addons. Note the Database
-# instantiation: require('better-sqlite3') alone loads NOTHING native — the
-# .node file is opened lazily inside the constructor — so a require-only check
-# reports success on a mismatched ABI and the server then dies at startup.
-_native_modules_ok() {
-  (cd "$OCTOALLY_DIR/server" && node -e \
-    "new (require('better-sqlite3'))(':memory:').close(); require('node-pty-prebuilt-multiarch')" \
-    >/dev/null 2>&1)
+# Append a line to the server log. Everything needed to diagnose a start that
+# dies before the server exists has to land here: under the desktop app nobody
+# ever sees the launcher's stdout, so a failure that only reaches the terminal
+# leaves the log showing npm's cheerful "rebuilt dependencies successfully" and
+# nothing else — which reads like a clean success.
+_log_file() {
+  mkdir -p "$OCTOALLY_DIR/logs" 2>/dev/null || true
+  printf '[octoally] %s\n' "$1" >> "$OCTOALLY_DIR/logs/octoally.log" 2>/dev/null || true
 }
 
-# Rebuild the native modules when the Node running them is not the Node they
-# were built with (apt/brew/nvm upgrade, a different Node in a service PATH,
-# ...). Keeps the install working on any Node instead of pinning one version.
-_ensure_native_modules() {
-  if _native_modules_ok; then
-    return 0
-  fi
-  if ! command -v npm >/dev/null 2>&1; then
-    log_error "Native modules need a rebuild for $(node -v 2>/dev/null || echo 'this Node'), but npm was not found"
+# Load ONE native addon in a process of its own and report whether the load
+# itself worked. Three details, each of them learned the hard way:
+#
+#   - better-sqlite3 has to be instantiated: require() alone loads NOTHING
+#     native (the .node is opened lazily inside the Database constructor), so a
+#     require-only check passes on a mismatched ABI and the server dies later.
+#   - the verdict comes from a sentinel written with a synchronous writeSync,
+#     never from the exit status. These addons can abort or segfault while the
+#     process tears down even when they are perfectly healthy (better-sqlite3's
+#     Statement destructor tripping RemoveEnvironmentCleanupHook). Judging by
+#     exit status turns that crash into a false "wrong ABI" and sends the
+#     launcher into a rebuild that cannot possibly fix anything. If the module
+#     loaded, the sentinel is already out before any of that can happen.
+#   - one module per process, so a crash in one is never blamed on the other.
+_probe_module() {
+  local out
+  out=$( (cd "$OCTOALLY_DIR/server" && node -e \
+    "$1; require('fs').writeSync(1, '__OA_OK__')" 2>/dev/null) || true )
+  case "$out" in *__OA_OK__*) return 0 ;; *) return 1 ;; esac
+}
+
+_probe_sqlite() { _probe_module "new (require('better-sqlite3'))(':memory:').close()"; }
+_probe_pty()    { _probe_module "require('node-pty-prebuilt-multiarch')"; }
+
+# The ABI a failing addon was built for, parsed out of Node's own dlopen error
+# ("... compiled against a different Node.js version using NODE_MODULE_VERSION
+# 109"). Empty when the module failed for any other reason — a missing file, a
+# missing shared library — which is exactly the distinction worth logging.
+_probe_built_abi() {
+  ( (cd "$OCTOALLY_DIR/server" && node -e "$1" 2>&1 >/dev/null) || true ) \
+    | sed -n 's/.*NODE_MODULE_VERSION \([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# Rebuild a native module for the Node that is about to run it (apt/brew/nvm
+# upgrade, a different Node in a service PATH, ...). Keeps the install working
+# on any Node instead of pinning one version.
+#
+# build/ is deleted first, and that deletion is the whole point: an incremental
+# `npm rebuild` over a stale build/ has been observed to recompile, relink, and
+# STILL leave a binary for the old ABI. npm reports success, the probe fails
+# again, and the launcher gives up — with a log that shows nothing but success.
+_rebuild_module() {
+  local pkg="$1"
+  local dir="$OCTOALLY_DIR/server/node_modules/$pkg"
+  local out=""
+  _rebuild_gated_scripts=false
+  rm -rf "$dir/build"
+  if ! out="$(npm rebuild --prefix "$OCTOALLY_DIR/server" --build-from-source "$pkg" 2>&1)"; then
+    printf '%s\n' "$out" >> "$OCTOALLY_DIR/logs/octoally.log"
     return 1
   fi
-  log_warn "Native modules built for another Node — rebuilding for $(node -v 2>/dev/null || echo 'current Node')..."
-  mkdir -p "$OCTOALLY_DIR/logs"
-  if npm rebuild --prefix "$OCTOALLY_DIR/server" better-sqlite3 node-pty-prebuilt-multiarch \
-      >> "$OCTOALLY_DIR/logs/octoally.log" 2>&1 && _native_modules_ok; then
-    log_ok "Rebuild complete"
+  printf '%s\n' "$out" >> "$OCTOALLY_DIR/logs/octoally.log"
+  # npm >= 11.5 only runs the install scripts of packages listed under
+  # "allowScripts" in package.json; for the rest it warns today and is heading
+  # towards refusing. Remember the warning so a rebuild that fixed nothing can
+  # name it as a suspect instead of blaming the compiler.
+  case "$out" in *allowScripts*) _rebuild_gated_scripts=true ;; esac
+  return 0
+}
+
+# Heal only what is actually broken. A blanket rebuild of both modules is worse
+# than useless: better-sqlite3 loads an N-API prebuild (prebuilds/<platform>.node)
+# that is ABI-independent by construction, so it is never the module a Node
+# upgrade breaks, and rebuilding it as collateral damage only widens the blast
+# radius of a node-pty problem.
+_ensure_native_modules() {
+  local sqlite_ok=false pty_ok=false
+  _probe_sqlite && sqlite_ok=true
+  _probe_pty && pty_ok=true
+  if $sqlite_ok && $pty_ok; then
     return 0
   fi
-  log_error "Rebuild failed — see $OCTOALLY_DIR/logs/octoally.log"
-  log_info "A compiler toolchain may be missing (build-essential + python3 on Linux, Xcode CLT on macOS)."
-  return 1
+
+  # A Node below the minimum cannot be healed by a rebuild, and attempting one
+  # is actively destructive: npm happily rebuilds the addons for THAT Node's
+  # ABI, so a single start under an old distro node replaces working binaries
+  # with ones the user's real Node cannot load — which is how a blank window
+  # once turned into an install broken from the terminal too. _ensure_node_on_path
+  # should have prevented this; if it somehow didn't, stop while the install is
+  # still intact.
+  if ! _node_supported "$(command -v node 2>/dev/null || true)"; then
+    log_error "Node $(node -v 2>/dev/null || echo '?') cannot run OctoAlly (needs ${OCTOALLY_MIN_NODE_MAJOR}+) — not rebuilding native modules"
+    _log_file "Refusing to rebuild native modules for Node $(node -v 2>/dev/null || echo '?') — below the required ${OCTOALLY_MIN_NODE_MAJOR}; server NOT started."
+    return 1
+  fi
+
+  local want
+  want=$(node -p 'process.versions.modules' 2>/dev/null || echo '?')
+
+  if ! command -v npm >/dev/null 2>&1; then
+    log_error "Native modules need a rebuild for $(node -v 2>/dev/null || echo 'this Node'), but npm was not found"
+    _log_file "Native modules unusable and npm is not on PATH — server NOT started."
+    return 1
+  fi
+  mkdir -p "$OCTOALLY_DIR/logs"
+
+  local pkg probe built
+  for pkg in better-sqlite3 node-pty-prebuilt-multiarch; do
+    case "$pkg" in
+      better-sqlite3)
+        $sqlite_ok && continue
+        probe="new (require('better-sqlite3'))(':memory:').close()"
+        ;;
+      *)
+        $pty_ok && continue
+        probe="require('node-pty-prebuilt-multiarch')"
+        ;;
+    esac
+    built=$(_probe_built_abi "$probe") || true
+    if [ -n "$built" ]; then
+      log_warn "$pkg was built for Node ABI ${built}, this Node needs ${want} — rebuilding..."
+      _log_file "$pkg: ABI ${built} != ${want} required by $(node -v 2>/dev/null); clean rebuild"
+    else
+      log_warn "$pkg failed to load — rebuilding for $(node -v 2>/dev/null || echo 'current Node')..."
+      _log_file "$pkg: failed to load (no ABI mismatch reported); clean rebuild"
+    fi
+    if ! _rebuild_module "$pkg"; then
+      log_error "Rebuild of $pkg failed — see $OCTOALLY_DIR/logs/octoally.log"
+      log_info "A compiler toolchain may be missing (build-essential + python3 on Linux, Xcode CLT on macOS)."
+      _log_file "$pkg: rebuild failed — server NOT started."
+      return 1
+    fi
+
+    # Re-probe THIS module before moving on. Loading it is the only evidence
+    # that the rebuild achieved anything: "rebuilt dependencies successfully"
+    # is what npm printed on every one of the five starts that left this
+    # install unusable, and the launcher took it at face value each time.
+    if _probe_module "$probe"; then
+      continue
+    fi
+    log_error "$pkg still does not load after being rebuilt"
+    if [ "$_rebuild_gated_scripts" = true ] && [ ! -d "$OCTOALLY_DIR/server/node_modules/$pkg/build" ]; then
+      log_info "npm compiled nothing and warned about \"allowScripts\" — listing $pkg there (server/package.json) may be what it wants."
+      _log_file "$pkg: no build/ after the rebuild, npm warned about allowScripts — server NOT started."
+    else
+      log_info "A compiler toolchain may be missing (build-essential + python3 on Linux, Xcode CLT on macOS)."
+      _log_file "$pkg: rebuilt but still unloadable — server NOT started."
+    fi
+    return 1
+  done
+
+  # Every module the loop touched was re-probed there, and the untouched ones
+  # loaded before it ran — so reaching this point means the install is healthy.
+  log_ok "Rebuild complete"
+  _log_file "Native modules rebuilt for $(node -v 2>/dev/null); ABI ${want}"
+  return 0
 }
 
 # Terminate all processes bound to the given TCP port: SIGTERM, wait, SIGKILL.

@@ -5,6 +5,9 @@
   "author": "AI Genius Automations <support@aigeniusautomations.com>",
   "license": "Apache-2.0 WITH Commons-Clause",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc && cp -r src/data/agents dist/data/ && cp src/data/statusline.sh dist/data/",
@@ -34,6 +37,10 @@
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "allowScripts": {
+    "better-sqlite3": true,
+    "node-pty-prebuilt-multiarch": true
   },
   "overrides": {
     "fast-uri": ">=3.1.2"

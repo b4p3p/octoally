@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Menu, shell, ipcMain, session, globalShortcut, dialog } from 'electron';
 import * as path from 'path';
+import * as os from 'os';
 import * as http from 'http';
 import { resolveCliPath, isServerReachable, startServer, waitForServer, stopServer, stopServerOnPort, isServerRunning, isServiceInstalled } from './server-manager';
 import { createTray, destroyTray } from './tray';
@@ -9,7 +10,71 @@ import { readDesktopSettings, writeDesktopSetting } from './desktop-settings';
 let mainWindow: BrowserWindow | null = null;
 const cliPath = resolveCliPath();
 
-function createWindow() {
+/** Where the dashboard lives: Vite in dev, the server itself in production. */
+function dashboardUrl(): string {
+  return process.env.ELECTRON_ENABLE_LOGGING ? 'http://localhost:42011' : 'http://localhost:42010';
+}
+
+/**
+ * True while the window shows the diagnostics page instead of the dashboard.
+ * The watchdog needs to know: a server that came up by any route — its own
+ * restart, `octoally start` in a terminal, the user fixing their Node — has to
+ * pull the window back to the dashboard, or the page it is stuck on keeps
+ * promising a recovery that already happened.
+ */
+let showingFailurePage = false;
+
+/**
+ * What to show when the server never came up. Without this the window loads
+ * http://localhost:42010, gets a connection refused, and the whole failure
+ * reaches the user as a blank white page — no reason, no log path, nothing to
+ * act on. The launcher's own words go in `detail`.
+ */
+function startupFailurePage(detail: string): string {
+  const esc = (t: string) =>
+    t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const logPath = path.join(os.homedir(), 'octoally', 'logs', 'octoally.log');
+  const body = detail.trim()
+    ? `<pre>${esc(detail.trim().split('\n').slice(-12).join('\n'))}</pre>`
+    : '<p class="muted">The launcher exited without saying why.</p>';
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OctoAlly</title><style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0f1117;
+    color: #e4e8f1; display: flex; align-items: center; justify-content: center;
+    height: 100vh; padding: 2rem; }
+  .card { max-width: 46rem; width: 100%; background: #1a1d27; border: 1px solid #2e3340;
+    border-radius: 10px; padding: 1.75rem 2rem; }
+  h1 { font-size: 1.15rem; font-weight: 600; margin-bottom: 0.6rem; }
+  p { font-size: 0.85rem; color: #8b92a8; line-height: 1.6; }
+  pre { margin: 1.1rem 0; padding: 0.9rem 1rem; background: #0f1117; border: 1px solid #2e3340;
+    border-radius: 6px; font-size: 0.78rem; line-height: 1.5; color: #cbd2e1;
+    white-space: pre-wrap; word-break: break-word; max-height: 16rem; overflow-y: auto; }
+  code { font-size: 0.78rem; color: #cbd2e1; }
+  .muted { margin: 1.1rem 0; }
+  .foot { margin-top: 1.2rem; font-size: 0.78rem; color: #6b7285; }
+</style></head>
+<body><div class="card">
+  <h1>OctoAlly could not start its server</h1>
+  <p>The desktop app is running, but nothing is listening on port 42010.</p>
+  ${body}
+  <p>Full log: <code>${esc(logPath)}</code></p>
+  <p class="foot">Retrying every few seconds — this page goes away on its own once the server answers.</p>
+</div></body></html>`;
+  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+}
+
+function loadDashboard() {
+  showingFailurePage = false;
+  mainWindow?.loadURL(dashboardUrl());
+}
+
+function showFailurePage(detail: string) {
+  showingFailurePage = true;
+  mainWindow?.loadURL(startupFailurePage(detail));
+}
+
+function createWindow(startupError?: string) {
   // Remove default menu bar (File/Edit/View/Window/Help)
   Menu.setApplicationMenu(null);
 
@@ -78,8 +143,11 @@ function createWindow() {
   });
 
   // In dev mode, load from Vite dev server; in production, load from the server
-  const isDev = !!process.env.ELECTRON_ENABLE_LOGGING;
-  mainWindow.loadURL(isDev ? 'http://localhost:42011' : 'http://localhost:42010');
+  if (startupError === undefined) {
+    loadDashboard();
+  } else {
+    showFailurePage(startupError);
+  }
 
   // Recover from renderer crashes — reload the page instead of showing a blank window
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
@@ -220,25 +288,28 @@ app.whenReady().then(async () => {
 
   // Start server if port 42010 is not reachable (regardless of PID file state)
   let reachable = await isServerReachable();
+  let startupError: string | undefined;
   if (!reachable) {
     console.log('[OctoAlly] Server not reachable, starting...');
     const started = await startServer(cliPath);
-    if (started) {
+    if (started.ok) {
       console.log('[OctoAlly] Server started, waiting for it to become reachable...');
       reachable = await waitForServer();
       if (reachable) {
         console.log('[OctoAlly] Server is now reachable');
       } else {
         console.warn('[OctoAlly] Server started but not reachable after 10s');
+        startupError = 'The launcher reported success, but nothing answered on port 42010 within 10 seconds.';
       }
     } else {
       console.warn('[OctoAlly] Failed to start server');
+      startupError = started.detail;
     }
   } else {
     console.log('[OctoAlly] Server already reachable on port 42010');
   }
 
-  createWindow();
+  createWindow(startupError);
   createTray({ cliPath, showWindow });
 
   // Watch for server death and auto-restart it (handles /api/restart and crashes)
@@ -247,19 +318,34 @@ app.whenReady().then(async () => {
   serverWatchdog = setInterval(async () => {
     if (restarting) return;
     const alive = await isServerReachable();
-    if (!alive) {
-      restarting = true;
-      console.log('[OctoAlly] Server not reachable, restarting...');
-      await startServer(cliPath);
-      const ok = await waitForServer(15000);
-      if (ok) {
-        console.log('[OctoAlly] Server restarted successfully');
-        mainWindow?.webContents.reload();
-      } else {
-        console.warn('[OctoAlly] Server failed to restart');
+    if (alive) {
+      // Whoever started it — this watchdog, a terminal, the user installing a
+      // newer Node — the window must leave the diagnostics page behind.
+      if (showingFailurePage) {
+        console.log('[OctoAlly] Server is up, leaving the diagnostics page');
+        loadDashboard();
       }
-      restarting = false;
+      return;
     }
+    restarting = true;
+    console.log('[OctoAlly] Server not reachable, restarting...');
+    const restarted = await startServer(cliPath);
+    const ok = await waitForServer(15000);
+    if (ok) {
+      console.log('[OctoAlly] Server restarted successfully');
+      // loadURL, not reload: the window may be showing the diagnostics page,
+      // and reloading that would just show it again.
+      loadDashboard();
+    } else {
+      console.warn('[OctoAlly] Server failed to restart');
+      // Same reasoning as at startup: a server that never comes back leaves a
+      // dead page behind, and "connection refused" explains nothing. Show the
+      // reason once — re-rendering it every 3s would only make it flicker.
+      if (!showingFailurePage) {
+        showFailurePage(restarted.detail || 'The server stopped answering and could not be restarted.');
+      }
+    }
+    restarting = false;
   }, 3000);
 
   app.on('before-quit', () => {

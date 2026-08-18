@@ -96,6 +96,11 @@ function buildNodeAwarePath(): string {
   // back — and the server's native modules (better-sqlite3, node-pty) are
   // compiled for a single NODE_MODULE_VERSION, so a different Node major makes
   // them fail to load and the server dies at startup with ERR_DLOPEN_FAILED.
+  //
+  // Enriching is all this does; it deliberately does not judge the node it
+  // finds. Whether that node is new enough to run the server is the launcher's
+  // call (OCTOALLY_MIN_NODE_MAJOR in bin/octoally), which owns the fallback
+  // search and the error message — one decider, not two that can disagree.
   if (!hasNodeIn([...currentPath.split(':'), ...extraDirs])) {
     extraDirs.push(...versionManagerNodeDirs(home));
   }
@@ -177,19 +182,35 @@ function newestVersionDir(dir: string): string | null {
   }
 }
 
+/**
+ * Outcome of a start attempt. `detail` carries what the launcher actually said
+ * — the only explanation a user ever gets when the server refuses to come up,
+ * since nobody sees the desktop app's stdout and a failure otherwise shows as
+ * a blank window.
+ */
+export interface StartResult {
+  ok: boolean;
+  detail: string;
+}
+
 /** Start the server via CLI */
-export function startServer(cli: string): Promise<boolean> {
+export function startServer(cli: string): Promise<StartResult> {
   return new Promise((resolve) => {
     const env = { ...process.env, PATH: buildNodeAwarePath() };
     // Generous timeout: when the Node ABI changed since install, `start` first
     // rebuilds better-sqlite3/node-pty, which can take minutes on a cold
     // node-gyp compile. Killing it at 15s would leave the rebuild unfinished
     // and the server permanently unstartable.
-    execFile(cli, ['start'], { timeout: 300000, env }, (err) => {
-      if (err) {
-        console.error('[OctoAlly] Failed to start server:', err.message);
+    execFile(cli, ['start'], { timeout: 300000, env }, (err, stdout, stderr) => {
+      if (!err) {
+        resolve({ ok: true, detail: '' });
+        return;
       }
-      resolve(!err);
+      // Colours are for a terminal the desktop app does not have.
+      const strip = (t: string) => (t || '').replace(/\x1b\[[0-9;]*m/g, '').trim();
+      const detail = [strip(stderr), strip(stdout), err.message].find((t) => t.length > 0) || '';
+      console.error('[OctoAlly] Failed to start server:', detail || err.message);
+      resolve({ ok: false, detail });
     });
   });
 }
