@@ -167,7 +167,11 @@ export function TaskModal({
   onLaunch: (task: string, agentType?: string, cliType?: 'claude' | 'codex', model?: string, rememberModel?: boolean, inheritMcp?: boolean) => void;
 }) {
   const [task, setTask] = useState(initialTask ?? '');
-  const [agentType, setAgentType] = useState(agents[0]?.name || 'coder');
+  // No 'coder' fallback: that was a ruflo agent that no longer exists, and a
+  // launch with it would fail at the CLI. An empty type is refused by the API
+  // instead, which is the honest failure — and unreachable anyway, since the
+  // wizard requires picking an agent before the task step.
+  const [agentType, setAgentType] = useState(agents[0]?.name ?? '');
   const [cliType, setCliType] = useState<'claude' | 'codex'>(initialCliType || 'claude');
   // A pre-filled task already embeds the project session prompt (it's the
   // final task of the source session) — blank the override so the prompt
