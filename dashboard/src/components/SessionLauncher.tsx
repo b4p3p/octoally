@@ -5,6 +5,7 @@ import { Play, Loader2, Bot, TerminalSquare, Globe, Users, X, FolderOpen, GitBra
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { SessionMicButton } from './SessionMicButton';
 import { ModelPicker } from './ModelPicker';
+import { AgentGuideModal } from './AgentGuide';
 
 interface SessionLauncherProps {
   project: Project;
@@ -189,6 +190,9 @@ export function TaskModal({
   // Wizard state — only used when mode === 'agent'. In session mode the
   // wizard is bypassed entirely and we go straight to the task step.
   const [wizardStep, setWizardStep] = useState<WizardStep>(mode === 'agent' ? 'intent' : 'task');
+  // "Run with OpenClaw": hands the task being composed here to an external bot
+  // as a ready-to-paste API guide, instead of launching it ourselves.
+  const [showAgentGuide, setShowAgentGuide] = useState(false);
   const [selectedIntent, setSelectedIntent] = useState<IntentDef | null>(null);
   const [browseQuery, setBrowseQuery] = useState('');
 
@@ -198,11 +202,15 @@ export function TaskModal({
   useEffect(() => {
     if (wizardStep === 'task') textareaRef.current?.focus();
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      // The guide sits on top of this modal — Escape must dismiss it first,
+      // not close the launcher out from under it.
+      if (showAgentGuide) { setShowAgentGuide(false); return; }
+      onClose();
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose, wizardStep]);
+  }, [onClose, wizardStep, showAgentGuide]);
 
   const sessionPromptVal = (sessionPrompt ?? project.session_prompt ?? '').trim();
   const effectiveTask = task.trim() || 'Start up and ask me what I want you to do and NOTHING ELSE';
@@ -740,7 +748,21 @@ export function TaskModal({
               </div>
 
               {/* Launch button */}
-              <div className="flex items-center justify-end gap-3 pt-2">
+              <div className="flex items-center justify-between gap-3 pt-2">
+                <button
+                  onClick={() => setShowAgentGuide(true)}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors border"
+                  style={{
+                    background: 'var(--bg-tertiary)',
+                    borderColor: 'var(--border)',
+                    color: 'var(--text-primary)',
+                  }}
+                  title="Get API command for OpenClaw or other bot agents"
+                >
+                  <Bot className="w-4 h-4" />
+                  Run with OpenClaw
+                </button>
+                <div className="flex items-center gap-3">
                 <button
                   onClick={onClose}
                   className="px-4 py-2 rounded-lg text-sm font-medium transition-colors"
@@ -765,11 +787,29 @@ export function TaskModal({
                   )}
                   Launch
                 </button>
+                </div>
               </div>
             </>
           )}
         </div>
       </div>
+
+      {/* OpenClaw guide — the project's OpenClaw prompt is folded in alongside
+          the session prompt, which is what makes that project field do anything
+          at all: this is its only consumer. */}
+      {showAgentGuide && (() => {
+        const ocPrompt = (project.openclaw_prompt ?? '').trim();
+        const instructions = [sessionPromptVal, ocPrompt].filter(Boolean).join('\n\n') || undefined;
+        return (
+          <AgentGuideModal
+            onClose={() => setShowAgentGuide(false)}
+            projectName={project.name}
+            projectPath={project.path}
+            task={task.trim() || undefined}
+            additionalInstructions={instructions}
+          />
+        );
+      })()}
     </div>
   );
 }
