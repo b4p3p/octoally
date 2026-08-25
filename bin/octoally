@@ -764,17 +764,23 @@ cmd_update() {
     esac
   fi
 
-  # Run the local update script (git pull + rebuild)
+  # Run the local update script — it picks its own mechanism: pull and rebuild
+  # on a git checkout, hand over to the installer on a release install.
   local update_script="$OCTOALLY_DIR/scripts/update.sh"
   if [ -f "$update_script" ]; then
     export OCTOALLY_DIR="$OCTOALLY_DIR"
-    bash "$update_script"
-    local exit_code=$?
+    # `set -e` is on: called bare, a failing update.sh would abort the CLI right
+    # here and the error branch below could never report anything.
+    local exit_code=0
+    bash "$update_script" || exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
       log_ok "Update complete!"
-      # Restart if running
-      if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+      # Only the git path leaves the restart to us. On a release install the
+      # installer has already stopped, replaced and restarted the server —
+      # bouncing it a second time would drop the desktop client again for
+      # nothing.
+      if [ -d "$OCTOALLY_DIR/.git" ] && [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
         log_info "Restarting..."
         cmd_restart
       fi

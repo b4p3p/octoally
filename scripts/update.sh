@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # OctoAlly Update Script
-# Pulls latest changes and rebuilds.
+#
+# Two kinds of install, two mechanisms:
+#   - git checkout    pull the branch and rebuild in place
+#   - release archive no .git and no sources, so there is nothing to pull:
+#                     the installer is the update mechanism, and this script
+#                     hands over to it
 #
 # Usage:
 #   octoally update
@@ -11,7 +16,11 @@ set -euo pipefail
 # Find OctoAlly installation directory
 if [ -z "${OCTOALLY_DIR:-${HIVECOMMAND_DIR:-}}" ]; then
   for candidate in "$HOME/octoally" "/opt/octoally" "$HOME/hivecommand" "/opt/hivecommand"; do
-    if [ -d "$candidate/.git" ]; then
+    # A checkout is marked by .git, a release install by the version.json the
+    # installer leaves behind. Looking only for .git is why `octoally update`
+    # used to die with "Cannot find OctoAlly installation directory" on every
+    # install that came from a release.
+    if [ -d "$candidate/.git" ] || [ -f "$candidate/version.json" ]; then
       OCTOALLY_DIR="$candidate"
       break
     fi
@@ -77,6 +86,54 @@ fi
 for old_bin in /usr/local/bin/openflow "$HOME/.local/bin/openflow" /usr/local/bin/hivecommand "$HOME/.local/bin/hivecommand"; do
   [ -L "$old_bin" ] || [ -f "$old_bin" ] && rm -f "$old_bin" 2>/dev/null || true
 done
+
+# --- Release-archive install: reinstall instead of pulling --------------------
+# An install produced by install.sh carries dist/ but no sources and no .git:
+# there is nothing here to fetch, and nothing to rebuild. The installer is the
+# update path — it downloads the current release, swaps the tree, refreshes the
+# desktop app and restarts the server, keeping ~/.octoally and logs/ intact.
+if [ ! -d "$OCTOALLY_DIR/.git" ]; then
+  INSTALLED_VERSION=$(node -p "require('$OCTOALLY_DIR/version.json').version" 2>/dev/null || echo "unknown")
+  log_info "Release install detected (v$INSTALLED_VERSION) — updating through the installer..."
+
+  INSTALLER_COPY=$(mktemp)
+  trap 'rm -f "$INSTALLER_COPY"' EXIT
+
+  if [ -f "$OCTOALLY_DIR/scripts/install.sh" ]; then
+    cp "$OCTOALLY_DIR/scripts/install.sh" "$INSTALLER_COPY"
+  else
+    # Archives built before the installer shipped inside them: fetch it from the
+    # repository this install came from. version.json is the only record of that
+    # coordinate — never hardcode one here, forks update from their own repo.
+    REPO=$(node -p "require('$OCTOALLY_DIR/version.json').repo" 2>/dev/null || echo "")
+    if [ -z "$REPO" ] || [ "$REPO" = "undefined" ]; then
+      log_error "No scripts/install.sh in $OCTOALLY_DIR and no \"repo\" in version.json."
+      log_info  "Update by re-running the installer for your fork:"
+      log_info  "  curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh | bash"
+      exit 1
+    fi
+    log_info "Fetching the installer from $REPO..."
+    if ! curl -fsSL "https://raw.githubusercontent.com/$REPO/main/scripts/install.sh" -o "$INSTALLER_COPY"; then
+      log_error "Cannot download the installer from $REPO"
+      exit 1
+    fi
+  fi
+
+  # Two precautions, both about the installer deleting the tree we are standing
+  # in: run a copy rather than $OCTOALLY_DIR/scripts/install.sh, which is
+  # removed while it would still be executing, and leave the directory first so
+  # nothing downstream inherits a working directory that no longer exists.
+  cd /
+  if ! OCTOALLY_INSTALL_DIR="$OCTOALLY_DIR" bash "$INSTALLER_COPY"; then
+    log_error "Installer failed — see the output above."
+    exit 1
+  fi
+
+  # The installer already stopped the server, replaced the tree and started it
+  # again, so the rebuild and restart below are for the git path only.
+  log_ok "Update complete"
+  exit 0
+fi
 
 # Get current and target versions
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
