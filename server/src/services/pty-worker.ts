@@ -16,6 +16,7 @@ import { existsSync, unlinkSync, mkdirSync, createReadStream, readFileSync, read
 import { join } from 'path';
 import { homedir, tmpdir } from 'os';
 import type { ReadStream } from 'fs';
+import { findAgentMdIn, findBundledAgentPath, parseAgentFrontmatter } from '../data/bundled-agents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -326,15 +327,29 @@ interface ParsedAgent {
   capabilities: string[];
 }
 
-function findAgentMdPath(agentType: string, projectPath: string): string | null {
-  const candidates = [
-    join(projectPath, '.claude', 'agents', `${agentType}.md`),
-    join(homedir(), '.claude', 'agents', `${agentType}.md`),
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
+/** Where a resolved agent .md came from — the Claude launch path needs to know:
+ *  files the CLI can find on its own are left to it, the bundle is passed inline. */
+type AgentSource = 'project' | 'home' | 'bundle';
+
+/**
+ * Resolve an agent definition, user copies first so a customized agent always
+ * wins over the bundled one:
+ *   <projectPath>/.claude/agents/  →  ~/.claude/agents/  →  bundle
+ */
+function resolveAgentMd(agentType: string, projectPath: string): { path: string; source: AgentSource } | null {
+  if (projectPath) {
+    const p = findAgentMdIn(join(projectPath, '.claude', 'agents'), agentType);
+    if (p) return { path: p, source: 'project' };
   }
+  const h = findAgentMdIn(join(homedir(), '.claude', 'agents'), agentType);
+  if (h) return { path: h, source: 'home' };
+  const b = findBundledAgentPath(agentType);
+  if (b) return { path: b, source: 'bundle' };
   return null;
+}
+
+function findAgentMdPath(agentType: string, projectPath: string): string | null {
+  return resolveAgentMd(agentType, projectPath)?.path ?? null;
 }
 
 function parseAgentMd(mdPath: string): ParsedAgent | null {
@@ -443,6 +458,35 @@ function buildCodexAgentPrompt(agentType: string, task: string, projectPath: str
   return lines.join('\n');
 }
 
+/**
+ * Build the `--agents <json>` payload for a bundled agent.
+ *
+ * The bundle isn't on any path Claude Code scans, so the definition has to
+ * travel with the launch: `--agents` takes a JSON object of inline agents and
+ * `--agent` then selects one by key. Keyed by `agentType` so the two match
+ * even when the file's frontmatter name differs from its filename.
+ *
+ * `model` is carried over as-is; an explicit `--model` from the dashboard
+ * still wins over it, which is the behaviour users already had when these
+ * files lived in ~/.claude/agents/.
+ */
+function buildBundledAgentsJson(agentType: string, mdPath: string): string | null {
+  let content: string;
+  try { content = readFileSync(mdPath, 'utf-8'); } catch { return null; }
+
+  const parsed = parseAgentFrontmatter(content);
+  if (!parsed || !parsed.body) return null;
+
+  const def: { description: string; prompt: string; tools?: string[]; model?: string } = {
+    description: parsed.fm.description || `${agentType} agent`,
+    prompt: parsed.body,
+  };
+  if (parsed.fm.tools?.length) def.tools = parsed.fm.tools;
+  if (parsed.fm.model) def.model = parsed.fm.model;
+
+  return JSON.stringify({ [agentType]: def });
+}
+
 function buildAgentCommand(agentType: string, task: string, direct = false, sessionCmd = '', cliType: 'claude' | 'codex' = 'claude', projectPath = '', model = '', inheritMcp = false): string {
   const escapedType = agentType.replace(/'/g, "'\\''");
   const escapedTask = task.replace(/'/g, "'\\''");
@@ -468,10 +512,18 @@ function buildAgentCommand(agentType: string, task: string, direct = false, sess
   } else {
     const baseCmd = sessionCmd || 'claude';
     const mf = modelFlag(model, cliType);
-    // Claude CLI uses --agent to load agent definitions from .claude/agents/
+    // Claude CLI resolves --agent against .claude/agents/ in the project and in
+    // the home dir. It can't see our bundle, so a bundled agent is passed
+    // inline with --agents and then selected by name.
+    const resolved = resolveAgentMd(agentType, projectPath);
+    let agentsFlag = '';
+    if (resolved?.source === 'bundle') {
+      const json = buildBundledAgentsJson(agentType, resolved.path);
+      if (json) agentsFlag = ` --agents '${json.replace(/'/g, "'\\''")}'`;
+    }
     cmd = task
-      ? `${baseCmd}${mf} --agent '${escapedType}' '${escapedTask}'`
-      : `${baseCmd}${mf} --agent '${escapedType}'`;
+      ? `${baseCmd}${mf}${agentsFlag} --agent '${escapedType}' '${escapedTask}'`
+      : `${baseCmd}${mf}${agentsFlag} --agent '${escapedType}'`;
   }
 
   if (direct) {

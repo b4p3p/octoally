@@ -40,6 +40,25 @@ Monorepo: a headless engine plus web and desktop clients.
 - Verify changes in `dev:isolated` by **measuring the real DOM / tmux geometry**, not by eye.
 - The dashboard pivot work is **frontend-only**; `deploy:ui` updates just the served dashboard.
 
+## Bundled agents (never install them globally)
+
+The 36 agent definitions in `server/src/data/agents/` stay **in the bundle**. They must
+not be copied into `~/.claude/agents/`: that folder is global, and Claude Code injects
+the name, description and tool list of everything in it into the prompt of *every*
+session on the machine — ~5.4k tokens billed to projects that never open OctoAlly.
+Versions up to 1.1.3 installed them there; `cleanupInstalledAgents()` takes the
+untouched copies back out on startup.
+
+Only the agent being launched travels with the launch (`server/src/services/pty-worker.ts`):
+
+- **Claude** — a bundled agent is passed inline as `--agents '<json>' --agent '<name>'`.
+  An agent the user keeps in `<project>/.claude/agents/` or `~/.claude/agents/` is left to
+  the CLI's own `--agent` resolution, so their YAML is honoured in full.
+- **Codex / inherit-MCP** — no `--agent` flag exists, so the `.md` is read and turned into
+  a persona prompt (`buildCodexAgentPrompt`).
+- Resolution order is always project → home → bundle, by frontmatter `name` as well as by
+  filename (four bundled files declare a `name` that differs from their filename).
+
 ## Terminal architecture (read before touching any terminal code)
 
 The hard constraint and the model that works:

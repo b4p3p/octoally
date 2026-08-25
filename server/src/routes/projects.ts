@@ -8,7 +8,7 @@ import { execFile } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, readdirSync, lstatSync, unlinkSync, rmdirSync } from 'fs';
 import { promisify } from 'util';
 import { getSetting } from './settings.js';
-import { installDefaultAgents } from '../data/default-agents.js';
+import { cleanupInstalledAgents, getBundledAgents } from '../data/bundled-agents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -694,9 +694,6 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     const project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id);
     await exportToConfig();
 
-    // Ensure default agents are installed (no-op if marker exists)
-    try { installDefaultAgents(); } catch { /* non-fatal */ }
-
     return { ok: true, project };
   });
 
@@ -869,10 +866,11 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     // Update disposition to 'removed'
     upsert.run('ruflo_disposition', 'removed');
 
-    // Re-install default agents (ruflo cleanup may have deleted .claude/agents/)
+    // Take our bundled agents back out of ~/.claude/agents/ if an older version
+    // put them there — they are read from the bundle at launch now.
     try {
-      const { installed } = installDefaultAgents(true);
-      if (installed.length > 0) globalCleaned.push(`installed ${installed.length} default agent(s)`);
+      const { removed } = cleanupInstalledAgents();
+      if (removed.length > 0) globalCleaned.push(`removed ${removed.length} bundled agent(s) from ~/.claude/agents/`);
     } catch { /* non-fatal */ }
 
     return { ok: true, projectsCleaned, globalCleaned };
@@ -919,7 +917,7 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
     return { ok: true, disposition };
   });
 
-  // List available agent types for a project (reads .claude/agents/*.md from project + global)
+  // List available agent types for a project (project + global .claude/agents/*.md, then the bundle)
   app.get<{
     Params: { id: string };
   }>('/projects/:id/ruflo-agents', async (req, reply) => {
@@ -956,11 +954,16 @@ export const projectRoutes: FastifyPluginAsync = async (app) => {
       } catch {}
     };
 
-    // Scan both global and project-level agent directories
-    await walkDir(join(homedir(), '.claude', 'agents'), 'global');
+    // Scan the user's agent directories, then fall back to the bundle. Order
+    // matters: dedup below keeps the first hit, so the most specific source
+    // has to come first.
     await walkDir(join(project.path, '.claude', 'agents'), 'project');
+    await walkDir(join(homedir(), '.claude', 'agents'), 'global');
+    for (const a of getBundledAgents()) {
+      agents.push({ name: a.name, type: '', description: a.description, category: 'bundled' });
+    }
 
-    // Deduplicate by name (project-level overrides global)
+    // Deduplicate by name (project overrides global, global overrides bundled)
     const seen = new Set<string>();
     const unique = agents.filter(a => {
       if (seen.has(a.name)) return false;

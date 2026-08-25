@@ -34,7 +34,7 @@ import type { AppRouter } from './trpc/router.js';
 import { killAllSessions, cleanupStaleRunningSessions, autoReconnectDetachedSessions, getReconnectStatus, startPendingSessionWatchdog } from './services/session-manager.js';
 import { config } from './config.js';
 import { appendFileSync, writeFileSync } from 'fs';
-import { installDefaultAgents } from './data/default-agents.js';
+import { cleanupInstalledAgents } from './data/bundled-agents.js';
 const tlog = (s: string) => { try { appendFileSync('/tmp/octoally-timing.log', `[${new Date().toISOString()}] ${s}\n`); } catch {} };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -96,10 +96,12 @@ async function start() {
   // Clear timing log for fresh run
   try { writeFileSync('/tmp/octoally-timing.log', ''); } catch {}
 
-  // Install default agents to ~/.claude/agents/ if not present
+  // Older versions copied the bundled agents into ~/.claude/agents/, where they
+  // cost context in every Claude Code session on the machine. Take them back out
+  // (untouched copies only) — the bundle is read directly at launch now.
   try {
-    const { installed } = installDefaultAgents();
-    if (installed.length > 0) console.log(`  Installed ${installed.length} default agent(s) to ~/.claude/agents/`);
+    const { removed } = cleanupInstalledAgents();
+    if (removed.length > 0) console.log(`  Removed ${removed.length} bundled agent(s) from ~/.claude/agents/ — now loaded on demand`);
   } catch { /* non-fatal */ }
 
   // Initialize database, load projects from user config, and clean up orphaned sessions
