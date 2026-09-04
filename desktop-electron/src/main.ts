@@ -10,6 +10,28 @@ import { readDesktopSettings, writeDesktopSetting } from './desktop-settings';
 let mainWindow: BrowserWindow | null = null;
 const cliPath = resolveCliPath();
 
+/**
+ * Linux/Wayland: speak Wayland directly instead of going through XWayland.
+ *
+ * On a fractionally scaled desktop (KDE at 1.75, GNOME at 125%) XWayland hands
+ * the app an integer-scaled window and lets the compositor stretch it. Text
+ * blurs, and every xterm.js cell box lands on a non-integer pixel: the terminal
+ * grid stops being pixel-correct, glyphs overlap the row above, and a keystroke
+ * looks like it did nothing until some later output forces a full repaint. With
+ * a native Wayland surface Chromium negotiates the fractional scale itself and
+ * renders at the real device ratio, so the grid stays exact at any scale.
+ *
+ * `auto` selects Wayland only when the session actually is Wayland, which makes
+ * this a no-op on X11 and on every other platform. `OCTOALLY_OZONE=x11` forces
+ * the old path back for a compositor that misbehaves.
+ */
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch(
+    'ozone-platform-hint',
+    process.env.OCTOALLY_OZONE || 'auto',
+  );
+}
+
 /** Where the dashboard lives: Vite in dev, the server itself in production. */
 function dashboardUrl(): string {
   return process.env.ELECTRON_ENABLE_LOGGING ? 'http://localhost:42011' : 'http://localhost:42010';
