@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import { getDb } from '../db/index.js';
+import { createOutputBatcher, type OutputBatcher } from './output-batcher.js';
 import { insertEvent } from './event-store.js';
 import { config } from '../config.js';
 import { getSetting } from '../routes/settings.js';
@@ -126,7 +127,7 @@ interface ActiveSession {
   externalSocket?: string; // external dtach socket (adopted sessions)
   replayBuffer: string[];  // ring buffer of recent output chunks for instant replay
   replayBytes: number;     // total bytes in replayBuffer
-  wsPendingData: string | null; // batched WS output waiting to be sent
+  wsBatcher: OutputBatcher;      // leading-edge throttle for WS output (see output-batcher.ts)
 }
 
 /** Default PTY geometry, owned by the server (not by any client). The PTY is
@@ -620,7 +621,17 @@ function wireWorker(sessionId: string, worker: ChildProcess, projectPath?: strin
     task: '',  // set by caller (spawnSession/spawnTerminal/reconnectSession)
     replayBuffer: [],
     replayBytes: 0,
-    wsPendingData: null,
+    wsBatcher: createOutputBatcher((data) => {
+      const a = activeSessions.get(sessionId);
+      if (!a) return;
+      for (const ws of a.subscribers) {
+        try {
+          ws.send(JSON.stringify({ type: 'output', sessionId, data }));
+        } catch {
+          a.subscribers.delete(ws);
+        }
+      }
+    }),
   };
 
   activeSessions.set(sessionId, active);
@@ -696,22 +707,9 @@ function wireWorker(sessionId: string, worker: ChildProcess, projectPath?: strin
         // Batch WebSocket output to avoid flooding the browser event queue.
         // Individual pipe-pane chunks are tiny and arrive hundreds/sec — sending
         // each as a separate WS message starves browser keyboard input events.
-        if (!active.wsPendingData) {
-          active.wsPendingData = msg.data;
-          setTimeout(() => {
-            const data = active.wsPendingData!;
-            active.wsPendingData = null;
-            for (const ws of active.subscribers) {
-              try {
-                ws.send(JSON.stringify({ type: 'output', sessionId, data }));
-              } catch {
-                active.subscribers.delete(ws);
-              }
-            }
-          }, 16); // ~60fps — one WS message per frame
-        } else {
-          active.wsPendingData += msg.data;
-        }
+        // Leading-edge: an isolated keystroke's echo leaves at once, a burst is
+        // still capped at one message per 16 ms window.
+        active.wsBatcher.push(msg.data);
         break;
       }
 
@@ -742,6 +740,7 @@ function wireWorker(sessionId: string, worker: ChildProcess, projectPath?: strin
         // Session is done — delete replay data immediately
         try { getDb().prepare('DELETE FROM pty_output WHERE session_id = ?').run(sessionId); } catch { /* ignore */ }
         removeTracker(sessionId);
+        active.wsBatcher.dispose();
         activeSessions.delete(sessionId);
 
         const db = getDb();
@@ -795,6 +794,7 @@ function wireWorker(sessionId: string, worker: ChildProcess, projectPath?: strin
         flushPtyInserts();
       }
       removeTracker(sessionId);
+      active.wsBatcher.dispose();
       activeSessions.delete(sessionId);
 
       // Check if the underlying tmux/dtach session is still alive (async to avoid blocking)
@@ -1497,6 +1497,7 @@ export async function killSession(sessionId: string): Promise<boolean> {
       }
     }, 2000);
 
+    active.wsBatcher.dispose();
     activeSessions.delete(sessionId);
     removeTracker(sessionId);
   }
@@ -1575,6 +1576,7 @@ export function releaseSession(sessionId: string): boolean {
     adoptedSockets.delete(extSocket);
   }
 
+  active.wsBatcher.dispose();
   activeSessions.delete(sessionId);
   removeTracker(sessionId);
 
@@ -1688,6 +1690,7 @@ export function killAllSessions(): void {
       `).run(id);
     } catch { /* DB might already be closed */ }
 
+    activeSessions.get(id)?.wsBatcher.dispose();
     activeSessions.delete(id);
   }
 }
