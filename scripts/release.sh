@@ -115,13 +115,21 @@ fi
 
 # --- Files to update ----------------------------------------------------------
 
+# Every package.json here needs its lockfile listed next to it. Two were missing
+# and drifted silently for months: desktop-electron's was five releases behind
+# before 6b8b385 resynced it by hand, and dashboard's still said 1.0.87 at
+# v1.1.5. Nothing breaks, npm only reads that field back for its own bookkeeping,
+# but a lockfile that disagrees with its package.json makes every `npm install`
+# rewrite it, which puts noise in unrelated diffs and hides real changes.
 VERSION_FILES=(
   package.json
   package-lock.json
   server/package.json
   server/package-lock.json
   dashboard/package.json
+  dashboard/package-lock.json
   desktop-electron/package.json
+  desktop-electron/package-lock.json
 )
 
 # --- Dry run ------------------------------------------------------------------
