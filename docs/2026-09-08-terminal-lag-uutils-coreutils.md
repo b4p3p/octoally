@@ -194,8 +194,55 @@ nothing and every sample times out.
 - **The mechanism inside uutils `cat`** (section 3.1).
 - **Whether other uutils replacements on the same path batch the same way.**
   Only `cat` and `dd` were tested.
-- **The Chromium GPU process** restarts three times at startup on this machine
-  under native Wayland (`Context was lost`, `eglCreateImage failed`), then
-  settles on the NVIDIA driver and stays quiet. It did not affect the frame
-  cadence, measured over 3000 frames at p50 6.2 ms, p99 7.2 ms, nothing above
-  20 ms, but it appeared with the move off XWayland and has not been explained.
+## 9. The GPU process crashes, which are not ours
+
+An earlier revision of this document listed three Chromium GPU process restarts
+at startup (`Context was lost`, `eglCreateImage failed`) as unexplained, and
+said they came with the move off XWayland and that the process then settled on
+the NVIDIA driver. Both halves were wrong, and the correction is worth keeping
+because the reasoning error is easy to repeat.
+
+They are not ours, and they are not about Wayland. Forcing the app back to X11
+with `OCTOALLY_OZONE=x11` reproduces them exactly: three crashes, same EGL
+errors. What Chromium reports about itself settles the rest, and it is the only
+source that does. `SystemInfo.getInfo` over the debugger, which is the data
+behind `chrome://gpu`:
+
+```
+gpu_compositing   disabled_software      glRenderer   Disabled
+rasterization     disabled_software      glVendor     Disabled
+opengl            disabled_off           webgl        disabled_off
+```
+
+Everything renders on the CPU. The earlier claim that it "settles on the NVIDIA
+driver" came from finding NVIDIA libraries mapped into a process, which says
+only that the libraries were loaded, never that a feature is enabled.
+
+The cause is on the machine, not in any application:
+
+```
+kernel module in memory   595.84
+userspace libraries       595.91.07
+nvidia-smi                Failed to initialize NVML: version mismatch
+vulkaninfo                enumerates only the integrated Radeon and llvmpipe
+```
+
+The NVIDIA driver was upgraded while the machine was running, six minutes after
+it booted, so the module in memory and the libraries on disk are different
+versions and cannot talk to each other. The card is unusable to every
+application until a reboot, and `nvidia-smi` says so plainly. Nothing in
+OctoAlly can work around that, and nothing should try.
+
+One measurement is worth keeping from this: even with all rendering on the CPU,
+the frame cadence held at p50 6.2 ms and p99 7.2 ms over 3000 frames, with
+nothing above 20 ms. The terminal was never GPU bound.
+
+Two traps this one laid, both of which caught a first pass:
+
+- **A crash counter is not an outcome.** Forcing GLVND to the NVIDIA vendor
+  with `__EGL_VENDOR_LIBRARY_FILENAMES` takes the crashes from three to zero,
+  which looks like a fix and is the opposite of one: EGL then fails to
+  initialise at all (`Initialization of all EGL display types failed`), so
+  nothing is left to crash. The feature status is identical either way.
+- **Loaded libraries are not enabled features.** Only `chrome://gpu`, or
+  `SystemInfo.getInfo` over the debugger, answers what is actually on.
