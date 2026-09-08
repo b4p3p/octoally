@@ -85,3 +85,14 @@ The hard constraint and the model that works:
 - Don't auto-normalize/reset PTY geometry on attach — it re-wraps everyone's scrollback.
 - Don't test terminal changes on the live install. Use `dev:isolated` and measure panes:
   `tmux -L octoally list-panes -t of-<sessionId> -F '#{pane_width}x#{pane_height}'`.
+- **Don't put `cat` back in the `pipe-pane` command** (`setupPipePane`, `pty-worker.ts`).
+  Every byte a session shows passes through that copier, and on distributions shipping
+  uutils coreutils instead of GNU (Ubuntu 26.04 makes it the default `/usr/bin/cat`)
+  `cat` batches pane output: p50 goes from 2.8 ms to 2245 ms with Claude Code in the
+  pane. `dd bs=65536` is a plain read/write loop and is POSIX. See
+  `docs/2026-09-08-terminal-lag-uutils-coreutils.md`.
+- Don't benchmark this path with a shell. A shell's echo comes back promptly whatever
+  the copier, so a shell-based probe reports 0.71 ms while the pipe stalls for seconds.
+  Measure with a TUI that redraws per keystroke: `scripts/bench-claude-redraw.mjs`.
+  And read a bench's loss counter, not only its percentiles: a stalling pipe shows up
+  as lost samples, and the percentile is computed over the survivors.

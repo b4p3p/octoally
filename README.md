@@ -96,6 +96,7 @@
 | Requirement | Why | Install |
 |-------------|-----|---------|
 | **Node.js 20+** | Runtime for the server | [nodejs.org](https://nodejs.org) |
+| **tmux** | Backs every session, so they survive a server restart and can be popped out to your own terminal | `apt install tmux` / `brew install tmux` |
 | **Claude Code** | Anthropic's AI coding agent | `npm install -g @anthropic-ai/claude-code` |
 | **Codex CLI** *(optional)* | OpenAI's AI coding agent | `npm install -g @openai/codex` |
 
