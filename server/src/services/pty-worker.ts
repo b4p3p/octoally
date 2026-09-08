@@ -247,7 +247,18 @@ function setupPipePane(sessionId: string, server?: string): { stream: ReadStream
     try { unlinkSync(fifoPath); } catch { /* doesn't exist */ }
     execFileSync('mkfifo', [fifoPath]);
     const stream = createReadStream(fifoPath, { encoding: 'utf8' });
-    execFileSync('tmux', [...serverArgs, 'pipe-pane', '-O', '-t', name, `cat > ${fifoPath}`]);
+    // `dd`, not `cat`: every byte a session ever shows passes through this copy,
+    // and on distributions that ship uutils coreutils instead of GNU (Ubuntu
+    // 26.04 makes it the default /usr/bin/cat) `cat` holds pane output back and
+    // releases it in bursts. On a shell that never shows, which is why it went
+    // unnoticed; on a real Claude Code session half the keystrokes waited over
+    // three seconds for their redraw. Measured on one session, same tmux, same
+    // geometry, only this command changed: cat p50 2246 ms, GNU cat p50 2.9 ms,
+    // dd p50 2.8 ms. `dd` with an explicit block size is a plain read/write loop
+    // that forwards every short read at once, and it is POSIX, so it behaves the
+    // same on macOS. stderr goes to /dev/null for the transfer summary alone —
+    // `status=none` would do it too but is not portable.
+    execFileSync('tmux', [...serverArgs, 'pipe-pane', '-O', '-t', name, `dd bs=65536 2>/dev/null > ${fifoPath}`]);
     return { stream, fifoPath };
   } catch (err) {
     console.error(`[PTY-WORKER] pipe-pane setup failed for ${sessionId}:`, err);
