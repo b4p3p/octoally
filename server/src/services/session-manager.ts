@@ -462,8 +462,15 @@ export function querySessionOutputSince(
    the worker process.
    ================================================================ */
 
-const TMUX_SERVER = 'octoally';
-const LEGACY_TMUX_SERVERS = ['hivecommand', 'openflow'];
+/** The tmux socket this server owns. Overridable through
+ *  OCTOALLY_TMUX_SERVER so a development instance keeps a tmux server of its
+ *  own: without it `dev:isolated` creates, resizes and kills sessions on the
+ *  very socket the installed server is using, one careless test away from the
+ *  user's open terminals. An override also drops the legacy socket lookup: a
+ *  sandbox that falls back to the old shared names is not a sandbox. */
+const TMUX_SERVER_OVERRIDE = process.env.OCTOALLY_TMUX_SERVER || '';
+const TMUX_SERVER = TMUX_SERVER_OVERRIDE || 'octoally';
+const LEGACY_TMUX_SERVERS = TMUX_SERVER_OVERRIDE ? [] : ['hivecommand', 'openflow'];
 const tmuxBaseArgs = ['-L', TMUX_SERVER];
 
 function tmuxSessionName(sessionId: string): string {

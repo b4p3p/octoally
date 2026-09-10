@@ -152,8 +152,15 @@ type ParentMessage =
    tmux helpers (same as session-manager but local to worker)
    ================================================================ */
 
-const TMUX_SERVER = 'octoally';
-const LEGACY_TMUX_SERVERS = ['hivecommand', 'openflow'];
+/** The tmux socket this server owns. Overridable through
+ *  OCTOALLY_TMUX_SERVER so a development instance keeps a tmux server of its
+ *  own: without it `dev:isolated` creates, resizes and kills sessions on the
+ *  very socket the installed server is using, one careless test away from the
+ *  user's open terminals. An override also drops the legacy socket lookup: a
+ *  sandbox that falls back to the old shared names is not a sandbox. */
+const TMUX_SERVER_OVERRIDE = process.env.OCTOALLY_TMUX_SERVER || '';
+const TMUX_SERVER = TMUX_SERVER_OVERRIDE || 'octoally';
+const LEGACY_TMUX_SERVERS = TMUX_SERVER_OVERRIDE ? [] : ['hivecommand', 'openflow'];
 const tmuxBaseArgs = ['-L', TMUX_SERVER];
 
 function tmuxSessionName(sessionId: string): string {
@@ -174,6 +181,51 @@ function findTmuxServer(sessionId: string): string | null {
 
 function tmuxExists(sessionId: string): boolean {
   return findTmuxServer(sessionId) !== null;
+}
+
+/** Is the tmux server for our socket already up? */
+function tmuxServerRunning(): boolean {
+  try {
+    execFileSync('tmux', [...tmuxBaseArgs, 'list-sessions'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Run `tmux new-session`, putting the tmux server in a control group of its
+ *  own the first time it starts.
+ *
+ *  A tmux server inherits the cgroup of whoever spawned it, and it holds every
+ *  open session: under the systemd unit that is the unit's group, under the
+ *  desktop app it is `app-octoally-desktop-<pid>.scope`. Either way, anything
+ *  that tears that group down takes all the user's terminals with it. That is
+ *  not hypothetical, it is how three sessions died here: a SIGKILL on the
+ *  server made systemd clean out the unit's group, tmux included.
+ *
+ *  A transient scope of its own belongs to nobody, so no one's shutdown
+ *  reaches it. Only the first session pays for it: once the server is up, the
+ *  later `new-session` calls are plain clients that connect and exit. tmux 3.x
+ *  already gives each pane its own `tmux-spawn-*.scope`, so with this the
+ *  whole tree is out of reach.
+ *
+ *  Everything about it is best effort: no systemd-run, no user bus (a headless
+ *  box, a server with no XDG_RUNTIME_DIR), or a scope name already taken, and
+ *  it falls back to starting tmux the ordinary way. */
+async function tmuxNewSession(args: string[], opts: { cwd: string; env: Record<string, string> }): Promise<void> {
+  const canScope = process.platform === 'linux'
+    && (opts.env.XDG_RUNTIME_DIR || opts.env.DBUS_SESSION_BUS_ADDRESS)
+    && !tmuxServerRunning();
+  if (canScope) {
+    try {
+      await execFileAsync('systemd-run', [
+        '--user', '--scope', '--quiet', '--unit', `octoally-tmux-${TMUX_SERVER}`,
+        'tmux', ...args,
+      ], opts);
+      return;
+    } catch { /* no systemd-run, no bus, or the unit name is taken */ }
+  }
+  await execFileAsync('tmux', args, opts);
 }
 
 async function tmuxCreate(
@@ -204,7 +256,7 @@ async function tmuxCreate(
     ? [envCmd, ...envArgs, shell, '-i', '-c', command]
     : [envCmd, ...envArgs, shell, '-i'];
 
-  await execFileAsync('tmux', [
+  await tmuxNewSession([
     ...tmuxBaseArgs, 'new-session', '-d', '-s', name,
     '-x', String(cols), '-y', String(rows),
     ...runArgs,
