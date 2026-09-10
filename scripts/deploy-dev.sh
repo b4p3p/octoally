@@ -27,10 +27,33 @@ fi
 log_info "Checking system runtime dependencies..."
 bash "$SRC_DIR/scripts/ensure-runtime-deps.sh"
 
-# 1. Stop running server
+# 1. Stop the running server, gracefully and through whoever owns it.
+#    `fuser -k` used to be the first move, and it cost three live sessions:
+#    SIGKILL on the main process makes systemd clean out the whole control
+#    group, which takes tmux, the Claude processes and their MCP servers with
+#    it. A graceful stop lets the server run killAllSessions(), which kills the
+#    PTY workers and deliberately leaves tmux alive for the reconnect.
 log_info "Stopping server..."
-fuser -k 42010/tcp >/dev/null 2>&1 || true
-sleep 1
+SERVICE_ACTIVE=false
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet octoally; then
+  SERVICE_ACTIVE=true
+  log_info "The systemd unit owns the server: stopping it there (needs sudo)."
+  sudo systemctl stop octoally
+else
+  "$INSTALL_DIR/bin/octoally" stop >/dev/null 2>&1 || true
+fi
+
+# Wait for the port to come free; force only what refuses to let go.
+for _ in $(seq 1 10); do
+  ss -ltn 2>/dev/null | grep -q ":42010" || break
+  sleep 1
+done
+if ss -ltn 2>/dev/null | grep -q ":42010"; then
+  log_error "Port 42010 still bound after a graceful stop: forcing it."
+  log_error "Sessions open right now may not survive this."
+  fuser -k 42010/tcp >/dev/null 2>&1 || true
+  sleep 1
+fi
 
 # 2. Install dependencies & build all
 log_info "Installing dependencies..."
@@ -83,10 +106,15 @@ else
   log_info "Skipping Electron (no asar found at $ELECTRON_ASAR)"
 fi
 
-# 6. Restart server
+# 6. Restart the server the same way it was stopped. Starting it by hand while
+#    the unit is enabled is how the port gets stolen from systemd: the unit
+#    restart-loops on EADDRINUSE, burns through StartLimitBurst and lands in
+#    'failed', leaving the install with nobody to bring it back up.
 log_info "Restarting server..."
-"$INSTALL_DIR/bin/octoally" stop 2>/dev/null || true
-sleep 1
-"$INSTALL_DIR/bin/octoally" start 2>/dev/null || true
+if [ "$SERVICE_ACTIVE" = true ]; then
+  sudo systemctl start octoally
+else
+  "$INSTALL_DIR/bin/octoally" start 2>/dev/null || true
+fi
 
 log_ok "Deploy complete! Launch octoally-desktop to test."

@@ -22,8 +22,16 @@ Environment=PORT=42010
 StandardOutput=journal
 StandardError=journal
 
-# Graceful shutdown
-KillMode=mixed
+# Graceful shutdown. KillMode=process, not a control-group kill: the tmux
+# server that holds every open session is a child of this unit, so cleaning out
+# the cgroup takes down the user's terminals, the Claude processes inside them
+# and their MCP servers along with the server. That is not theory, it is what a
+# `fuser -k` on the port did here: systemd saw status=9/KILL and SIGKILLed
+# tmux, claude and every MCP in the group, three sessions at once.
+# Signalling the main process alone is enough: the server stops sessions the
+# right way on SIGINT (killAllSessions leaves tmux alive for reconnect), and a
+# PTY worker whose parent dies exits through its own 'disconnect' handler.
+KillMode=process
 KillSignal=SIGINT
 TimeoutStopSec=10
 
