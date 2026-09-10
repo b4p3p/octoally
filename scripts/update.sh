@@ -175,8 +175,17 @@ for pattern in "octoally-desktop" "hivecommand-desktop"; do
   if pgrep -f "$pattern" >/dev/null 2>&1; then
     log_info "Stopping desktop app ($pattern)..."
     pkill -TERM -f "$pattern" 2>/dev/null || true
-    sleep 1
-    pkill -KILL -f "$pattern" 2>/dev/null || true
+    # Let it close on its own. A SIGKILL after one second is not a shutdown:
+    # the app runs in a systemd scope of its own, and killing it hard makes
+    # systemd tear that scope down along with whatever else lives in it.
+    for _ in $(seq 1 20); do
+      pgrep -f "$pattern" >/dev/null 2>&1 || break
+      sleep 0.5
+    done
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+      log_warn "Desktop app still up after 10s — forcing it"
+      pkill -KILL -f "$pattern" 2>/dev/null || true
+    fi
   fi
 done
 # macOS app bundle name

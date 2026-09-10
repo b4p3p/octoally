@@ -502,11 +502,28 @@ _stop_pid_file() {
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       log_info "Stopping existing server (PID $pid)..."
       kill "$pid" 2>/dev/null || true
-      sleep 1
-      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+      # Give it room to stop its sessions properly. One second is not enough
+      # with several open, and the SIGKILL that follows is not free: under the
+      # systemd unit it makes systemd clean out the whole control group, which
+      # takes the tmux server and every terminal in it.
+      for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        log_warn "Server still up after 10s — forcing it (open sessions may not survive)"
+        kill -9 "$pid" 2>/dev/null || true
+      fi
     fi
   fi
 }
+# When the systemd unit owns the server, stop it there: killing the process
+# behind systemd's back is what makes it clean out the control group.
+if [ "$OS" = "Linux" ] && command -v systemctl >/dev/null 2>&1 \
+   && systemctl is-active --quiet octoally 2>/dev/null; then
+  log_info "Stopping the systemd service..."
+  $SUDO systemctl stop octoally 2>/dev/null || true
+fi
 _stop_pid_file "$INSTALL_DIR/.octoally.pid"
 _stop_pid_file "$INSTALL_DIR/.hivecommand.pid"
 _stop_pid_file "$TARGET_HOME/hivecommand/.hivecommand.pid"
@@ -557,8 +574,14 @@ if [ "$OS" = "Linux" ] && command -v fuser &>/dev/null; then
   if fuser -s "${KILL_PORT}/tcp" 2>/dev/null; then
     log_info "Force-stopping process on port ${KILL_PORT}..."
     fuser -k -TERM "${KILL_PORT}/tcp" 2>/dev/null || true
-    sleep 1
-    fuser -s "${KILL_PORT}/tcp" 2>/dev/null && fuser -k -KILL "${KILL_PORT}/tcp" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      fuser -s "${KILL_PORT}/tcp" 2>/dev/null || break
+      sleep 0.5
+    done
+    if fuser -s "${KILL_PORT}/tcp" 2>/dev/null; then
+      log_warn "Port ${KILL_PORT} still bound after 10s — forcing it (open sessions may not survive)"
+      fuser -k -KILL "${KILL_PORT}/tcp" 2>/dev/null || true
+    fi
   fi
 elif command -v lsof &>/dev/null; then
   pids="$(lsof -ti "tcp:${KILL_PORT}" 2>/dev/null || true)"
