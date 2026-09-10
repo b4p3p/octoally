@@ -17,7 +17,9 @@ Monorepo: a headless engine plus web and desktop clients.
 ## Commands
 
 - **Dev (isolated — always test here):** `npm run dev:isolated`
-  → server on :42020, dashboard (Vite) on :42021, separate DB `~/.octoally/octoally-dev.db`.
+  → server on :42020, dashboard (Vite) on :42021, separate DB `~/.octoally/octoally-dev.db`,
+  and its own tmux socket `octoally-dev` (`OCTOALLY_TMUX_SERVER`), so a dev instance can
+  never create, resize or kill a session on the socket the installed server is using.
   Never test on the live install ("deploy and pray" has burned us repeatedly).
 - **Build:** `npm run build` (or `build:dashboard` / `build:server`).
 - **Deploy UI to the local install (frontend only):** `npm run deploy:ui`
@@ -84,7 +86,8 @@ The hard constraint and the model that works:
   conflict that garbles the Electron client.
 - Don't auto-normalize/reset PTY geometry on attach — it re-wraps everyone's scrollback.
 - Don't test terminal changes on the live install. Use `dev:isolated` and measure panes:
-  `tmux -L octoally list-panes -t of-<sessionId> -F '#{pane_width}x#{pane_height}'`.
+  `tmux -L octoally-dev list-panes -t of-<sessionId> -F '#{pane_width}x#{pane_height}'`
+  (the installed server's socket is `octoally`; a dev server uses `octoally-dev`).
 - **Don't put `cat` back in the `pipe-pane` command** (`setupPipePane`, `pty-worker.ts`).
   Every byte a session shows passes through that copier, and on distributions shipping
   uutils coreutils instead of GNU (Ubuntu 26.04 makes it the default `/usr/bin/cat`)
@@ -104,3 +107,9 @@ The hard constraint and the model that works:
   unit is active, `octoally stop` otherwise. Same trap in any cgroup that ends up
   holding the tmux server, the desktop app's own scope included. See
   `docs/2026-09-10-service-unit-display-and-cgroup.md`.
+- The tmux server is started inside a transient scope of its own
+  (`octoally-tmux-<socket>.scope`, in `tmuxNewSession`), so it belongs to nobody's control
+  group and no one's shutdown reaches it. tmux 3.x already gives each pane its own
+  `tmux-spawn-*.scope`, but only when it can reach the user bus, which needs
+  `XDG_RUNTIME_DIR` — the same variable `graphicalEnv()` restores. Don't spawn the first
+  tmux session outside that helper.

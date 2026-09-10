@@ -1,9 +1,10 @@
 # Sessions under the service unit: no display, and a cgroup that kills them
 
 Date: 2026-09-10
-Status: **both causes found and fixed.** The clipboard fix is verified end to
-end in `dev:isolated` against a display-less server. The `KillMode` change is a
-unit-file change and takes effect at the next service start.
+Status: **both causes found and fixed**, and the sessions have since been taken
+out of everyone's control group entirely (section 5). Verified end to end in
+`dev:isolated`: the clipboard fix against a display-less server, the scope
+against a SIGKILLed one.
 
 Two separate faults, one shared root: the systemd unit the installed server
 normally runs under. Sessions it hosts cannot reach the compositor, and
@@ -118,14 +119,60 @@ active it goes through `systemctl stop`, otherwise through `octoally stop`;
 out loud that sessions may not survive. The restart is symmetric, so the port
 is not stolen back from systemd.
 
-## 5. Still open
+## 5. Out of everyone's control group
+
+`KillMode=process` fixes one control group. It does not fix the shape of the
+problem, which is that **the tmux server belongs to whoever spawned it**: under
+the unit that is the unit's group, under the desktop app it is
+`app-octoally-desktop-<pid>.scope`, which is `KillMode=control-group` and cannot
+be changed at runtime (`set-property` refuses `KillMode` on a live scope).
+Quitting the app would have taken the terminals with it.
+
+Two things were already better than they looked. tmux 3.x puts **each pane** in
+a transient scope of its own, `tmux-spawn-<uuid>.scope`, so the shells, the
+agents and their MCP servers are out of reach on their own. It only manages
+that when it can reach the user bus, which it finds through `XDG_RUNTIME_DIR`:
+under the service that variable was missing, which is why the journal at
+11:20:56 lists `claude` and `stefatt-mcp` inside the unit's group. The fix in
+section 1 restores it, so it restores the pane scopes too.
+
+That left the server itself, and `tmuxNewSession()` now starts it inside
+`octoally-tmux-<socket>.scope` through `systemd-run --user --scope`. Only the
+first session pays for it; afterwards `new-session` is a plain client that
+connects and exits. It is best effort throughout: no `systemd-run`, no user bus
+or a name already taken, and it falls back to starting tmux the ordinary way.
+
+Two details worth keeping:
+
+- `tmux start-server` inside the scope does **not** work. A tmux server with no
+  sessions exits immediately (`exit-empty` is on by default), the scope empties
+  and systemd collects it. Wrapping the first `new-session` is what makes the
+  server persist.
+- A running process can be moved between control groups by writing its pid into
+  the target's `cgroup.procs`, no signal involved. That is the only way to
+  rescue a tmux server that is already in the wrong group; new ones do not need
+  it.
+
+Verified in `dev:isolated`: the tmux server lands in
+`octoally-tmux-octoally-dev.scope` while the dev server sits in an unrelated
+one, and a `kill -9` on the dev server leaves the session running.
+
+Two smaller changes came with it. `dev:isolated` now has **its own tmux
+socket** (`OCTOALLY_TMUX_SERVER=octoally-dev`): until now a dev server created
+and killed sessions on the very socket the installed server was using, and an
+override also drops the legacy socket lookup, since a sandbox that falls back
+to shared names is not one. And the stop paths in `install.sh` and `update.sh`
+no longer escalate to SIGKILL after a single second: `install.sh` stops through
+systemd when the unit owns the server, and both wait ten seconds and say out
+loud when they force something.
+
+## 6. Still open
 
 - `cmd_start` in `bin/octoally` and `startServer` in the desktop app know
   nothing about the unit: whenever it is installed and enabled, either can take
   the port and put it back into a restart loop. The unit is a system unit, so
   the CLI cannot simply call `systemctl start` non-interactively; the fix needs
   a decision, not a patch.
-- **Any** control group holding the tmux server is the same trap. Right now the
-  sessions on this machine live inside the desktop app's own scope
-  (`app-octoally-desktop-<pid>.scope`, `KillMode=control-group`), because the
-  app started the server: quitting the app takes the terminals with it.
+- The dtach fallback is not covered. `dtachCreate` daemonises into the caller's
+  control group exactly as tmux used to, so on a machine without tmux the
+  original trap is still there.
