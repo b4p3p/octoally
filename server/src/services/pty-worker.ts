@@ -20,15 +20,69 @@ import { findAgentMdIn, findBundledAgentPath, parseAgentFrontmatter } from '../d
 
 const execFileAsync = promisify(execFile);
 
+/** Re-discover the graphical session vars when the server itself has none.
+ *
+ *  Installed with `octoally install-service` the server is a system unit
+ *  (WantedBy=multi-user.target): it starts at boot, before anyone logs in, so
+ *  it has no session environment: no WAYLAND_DISPLAY, no DISPLAY and no
+ *  XDG_RUNTIME_DIR. Those used to arrive by inheritance, because the desktop
+ *  app started the server itself (`startServer` -> `octoally start`) and
+ *  Electron has them. Under the unit nothing a session shells out to can reach
+ *  the compositor: `wl-paste` and `xclip` both fail, and pasting an image into
+ *  Claude Code silently does nothing.
+ *
+ *  The sockets are looked up per session, not once at startup, because at boot
+ *  they do not exist yet and their names change between logins. A server that
+ *  already inherited a display is left alone, which makes this a no-op for
+ *  `octoally start`, for the desktop app and for every non-Linux platform. */
+function graphicalEnv(): Record<string, string> {
+  if (process.platform !== 'linux') return {};
+  if (process.env.WAYLAND_DISPLAY || process.env.DISPLAY) return {};
+  if (typeof process.getuid !== 'function') return {};
+
+  const runtimeDir = process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`;
+  let entries: string[] = [];
+  let runtimeDirReadable = false;
+  try { entries = readdirSync(runtimeDir); runtimeDirReadable = true; } catch { /* not logged in yet */ }
+
+  const found: Record<string, string> = {};
+
+  const wayland = entries.filter((e) => /^wayland-\d+$/.test(e)).sort()[0];
+  if (wayland) found.WAYLAND_DISPLAY = wayland;
+
+  // X11, and XWayland on a Wayland session: the socket names the display, the
+  // cookie sitting in the runtime dir is what is allowed to open it.
+  let xSockets: string[] = [];
+  try { xSockets = readdirSync('/tmp/.X11-unix'); } catch { /* no X server here */ }
+  const xSocket = xSockets.filter((e) => /^X\d+$/.test(e)).sort()[0];
+  if (xSocket) {
+    found.DISPLAY = `:${xSocket.slice(1)}`;
+    const cookie = entries.find((e) => e.startsWith('xauth_'));
+    if (cookie) found.XAUTHORITY = join(runtimeDir, cookie);
+  }
+
+  // Headless machine: hand over nothing rather than a runtime dir on its own.
+  if (!found.WAYLAND_DISPLAY && !found.DISPLAY) return {};
+  // The X socket lives in /tmp and belongs to whoever is logged in, who on a
+  // shared machine need not be the user this server runs as. Pass the runtime
+  // dir on only when it was really there: an XDG_RUNTIME_DIR pointing at a
+  // directory that does not exist is worse than none, and dbus, pipewire and
+  // gnupg are the ones that walk into it.
+  if (runtimeDirReadable) found.XDG_RUNTIME_DIR = runtimeDir;
+  return found;
+}
+
 /** Build a clean env for user-facing sessions: strip server-specific vars so
  *  they don't leak into user terminals / Claude Code / dev servers.
  *  - NODE_ENV: prevents server's production mode from contaminating user shells
  *  - PORT / OCTOALLY_*_PORT: prevents sandbox port assignments from overriding
- *    child project .env files (dotenv won't override existing env vars) */
+ *    child project .env files (dotenv won't override existing env vars)
+ *  - graphicalEnv(): puts the display back when the server runs as a service */
 function sessionEnv(): Record<string, string> {
   const { NODE_ENV, PORT, OCTOALLY_API_PORT, OCTOALLY_DASH_PORT, ...rest } = process.env;
   return {
     ...rest,
+    ...graphicalEnv(),
     TERM: 'xterm-256color',
     OCTOALLY_SESSION: '1',
     HEADLESS_WORKERS_DISABLED: '1',
@@ -138,8 +192,14 @@ async function tmuxCreate(
   // Wrap the shell invocation with env -u to strip server-specific vars before
   // the shell starts — tmux new-session -d inherits from the tmux server's env,
   // not the client's, so the env option on execFileAsync alone isn't enough.
+  // The graphical vars ride the same wrapper, and for the same reason: on a
+  // tmux server started by an earlier session they would never make it in.
   const envCmd = 'env';
-  const envArgs = ['-u', 'NODE_ENV', '-u', 'PORT', '-u', 'OCTOALLY_API_PORT', '-u', 'OCTOALLY_DASH_PORT'];
+  const graphical = graphicalEnv();
+  const envArgs = [
+    '-u', 'NODE_ENV', '-u', 'PORT', '-u', 'OCTOALLY_API_PORT', '-u', 'OCTOALLY_DASH_PORT',
+    ...Object.entries(graphical).map(([k, v]) => `${k}=${v}`),
+  ];
   const runArgs = command
     ? [envCmd, ...envArgs, shell, '-i', '-c', command]
     : [envCmd, ...envArgs, shell, '-i'];
@@ -156,6 +216,12 @@ async function tmuxCreate(
   // Strip server-specific vars from tmux global env for any future windows/panes
   for (const varName of ['NODE_ENV', 'PORT', 'OCTOALLY_API_PORT', 'OCTOALLY_DASH_PORT']) {
     await execFileAsync('tmux', [...tmuxBaseArgs, 'set-environment', '-g', '-u', varName]).catch(() => {});
+  }
+
+  // ...and put the graphical ones there too, so a window opened later in this
+  // session can still reach the clipboard.
+  for (const [varName, value] of Object.entries(graphical)) {
+    await execFileAsync('tmux', [...tmuxBaseArgs, 'set-environment', '-g', varName, value]).catch(() => {});
   }
 
   try {
