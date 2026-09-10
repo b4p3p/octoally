@@ -96,3 +96,11 @@ The hard constraint and the model that works:
   Measure with a TUI that redraws per keystroke: `scripts/bench-claude-redraw.mjs`.
   And read a bench's loss counter, not only its percentiles: a stalling pipe shows up
   as lost samples, and the percentile is computed over the survivors.
+- **Don't kill the server with `fuser -k` (or any SIGKILL) when it runs under the
+  systemd unit.** The tmux server holding every open session is a child of that unit:
+  systemd sees `status=9/KILL` and SIGKILLs the whole control group, terminals, agents
+  and MCP servers included. The code path that preserves sessions (`killAllSessions()`
+  leaves tmux alive on SIGINT) never gets to run. Stop it with `systemctl stop` when the
+  unit is active, `octoally stop` otherwise. Same trap in any cgroup that ends up
+  holding the tmux server, the desktop app's own scope included. See
+  `docs/2026-09-10-service-unit-display-and-cgroup.md`.
