@@ -117,6 +117,21 @@ export function initDb(): void {
   // ruflo deprecation: seed disposition setting
   try { db.exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('ruflo_disposition', 'undecided')"); } catch {}
 
+  // Model defaults pinned to a concrete 1M release (`claude-opus-4-7[1m]`)
+  // freeze on that release: every new Opus meant re-picking it by hand, project
+  // by project. `opus[1m]` is the auto-updating alias the CLI resolves itself.
+  // Runs once (flag in settings), so a release pinned on purpose later stays put.
+  try {
+    const done = db.prepare("SELECT 1 FROM settings WHERE key = 'migrated_model_1m_alias'").get();
+    if (!done) {
+      db.transaction(() => {
+        db.exec("UPDATE projects SET default_model = 'opus[1m]' WHERE default_model LIKE 'claude-opus-%[1m]'");
+        db.exec("UPDATE settings SET value = 'opus[1m]' WHERE key = 'default_model' AND value LIKE 'claude-opus-%[1m]'");
+        db.exec("INSERT INTO settings (key, value) VALUES ('migrated_model_1m_alias', '1')");
+      })();
+    }
+  } catch {}
+
   // ruflo cleanup follow-up: reset *_command settings that still point to the
   // legacy ~/.octoally/ruflo-run.sh wrapper. Earlier ruflo-era installs
   // persisted that path into agent_/session_/hivemind_*_command; the surgical

@@ -18,6 +18,8 @@ interface ModelPickerProps {
 function displayLabel(id: string): string {
   if (!id) return '';
   // Compress "claude-opus-4-6[1m]" → "opus 4-6 1M" for readability
+  const alias = id.match(/^(opus|sonnet|haiku)\[1m\]$/);
+  if (alias) return `${alias[1]} 1M`;
   const m = id.match(/^claude-(opus|sonnet|haiku)-(.+?)(\[1m\])?$/);
   if (m) {
     const [, family, rest, one] = m;
@@ -28,8 +30,8 @@ function displayLabel(id: string): string {
 }
 
 function kindBadge(entry: ModelEntry): string {
-  if (entry.kind === 'alias') return 'alias';
   if (entry.has1m) return '1M';
+  if (entry.kind === 'alias') return 'alias';
   return '';
 }
 
@@ -208,7 +210,7 @@ export function ModelPicker({ value, onChange, label, hint, inheritLabel, classN
                         if (e.key === 'Enter') commitCustom();
                         else if (e.key === 'Escape') { setCustomMode(false); setCustomDraft(''); }
                       }}
-                      placeholder="claude-opus-4-7 or opus"
+                      placeholder="claude-opus-5-5 or opus[1m]"
                       className="flex-1 px-2 py-1 rounded text-xs"
                       style={{ background: 'var(--bg-primary)', color: 'var(--text-primary)', border: '1px solid var(--border)', outline: 'none' }}
                     />

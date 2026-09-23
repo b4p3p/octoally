@@ -6,10 +6,10 @@
  *   1. Stable aliases (`opus`, `sonnet`, `haiku`) — the Claude CLI resolves
  *      these to the current flagship of each family, so a user picking
  *      "opus" today automatically rides future releases.
- *   2. Curated list of the current flagship model IDs (KNOWN_LATEST) so the
- *      newest releases appear in the picker even if the user hasn't invoked
- *      them yet. Keep in sync with Anthropic's latest models.
- *   3. Concrete model IDs harvested from ~/.claude.json `lastModelUsage`
+ *      The `[1m]` forms (`opus[1m]`, `sonnet[1m]`) do the same for the
+ *      1M-context variant: pinning a concrete `claude-opus-X[1m]` instead
+ *      freezes the project on that release until someone edits it by hand.
+ *   2. Concrete model IDs harvested from ~/.claude.json `lastModelUsage`
  *      entries across all projects. Anything the user has actually invoked
  *      is guaranteed reachable with their current auth/tier.
  *
@@ -28,21 +28,11 @@ export interface ModelEntry {
 }
 
 const ALIASES: ModelEntry[] = [
+  { id: 'opus[1m]', kind: 'alias', family: 'opus', has1m: true },
   { id: 'opus', kind: 'alias', family: 'opus' },
+  { id: 'sonnet[1m]', kind: 'alias', family: 'sonnet', has1m: true },
   { id: 'sonnet', kind: 'alias', family: 'sonnet' },
   { id: 'haiku', kind: 'alias', family: 'haiku' },
-];
-
-/**
- * Current flagship model IDs. Shown in the picker even if the user hasn't
- * invoked them yet (so 1M-context variants and brand-new releases are
- * selectable immediately). Keep in sync with Anthropic's latest models.
- */
-const KNOWN_LATEST: ModelEntry[] = [
-  { id: 'claude-opus-4-7', kind: 'discovered', family: 'opus', has1m: false },
-  { id: 'claude-opus-4-7[1m]', kind: 'discovered', family: 'opus', has1m: true },
-  { id: 'claude-sonnet-4-6', kind: 'discovered', family: 'sonnet', has1m: false },
-  { id: 'claude-haiku-4-5', kind: 'discovered', family: 'haiku', has1m: false },
 ];
 
 function familyOf(id: string): 'opus' | 'sonnet' | 'haiku' | undefined {
@@ -107,23 +97,7 @@ export function listModels(opts?: { refresh?: boolean }): ModelEntry[] {
   if (!opts?.refresh && cached && Date.now() - cached.at < CACHE_MS) {
     return cached.entries;
   }
-  const discovered = discoverFromClaudeJson();
-  // Merge KNOWN_LATEST first so the brand-new flagship IDs appear even when
-  // .claude.json hasn't recorded them yet. Dedupe against discovered so we
-  // don't list the same ID twice.
-  const discoveredIds = new Set(discovered.map((m) => m.id));
-  const knownExtras = KNOWN_LATEST.filter((m) => !discoveredIds.has(m.id));
-  const merged = [...knownExtras, ...discovered];
-  // Re-sort merged list so "known latest" blend in by family+1m ordering.
-  const familyOrder = { opus: 0, sonnet: 1, haiku: 2 } as const;
-  merged.sort((a, b) => {
-    const fa = a.family ? familyOrder[a.family] : 99;
-    const fb = b.family ? familyOrder[b.family] : 99;
-    if (fa !== fb) return fa - fb;
-    if (!!a.has1m !== !!b.has1m) return a.has1m ? -1 : 1;
-    return b.id.localeCompare(a.id);
-  });
-  const entries = [...ALIASES, ...merged];
+  const entries = [...ALIASES, ...discoverFromClaudeJson()];
   cached = { entries, at: Date.now() };
   return entries;
 }
