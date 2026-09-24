@@ -1404,6 +1404,16 @@ export function releaseControl(sessionId: string, ws: WebSocket): void {
   active.controller = null;
   resizeSession(sessionId, DEFAULT_GEOMETRY.cols, DEFAULT_GEOMETRY.rows);
   broadcastGeometry(sessionId);
+  // Tell the remaining clients nobody drives the session now. A desktop view
+  // that was demoted by `control-lost` never claims again on its own, so
+  // without this the session stayed at DEFAULT_GEOMETRY, controller-less,
+  // after the other window closed: text laid out for 140 columns in a cell
+  // of a different size, and every resize from the demoted view ignored.
+  const msg = JSON.stringify({ type: 'control-free' });
+  for (const sub of active.subscribers) {
+    if (sub === ws) continue;
+    try { sub.send(msg); } catch { /* ignore */ }
+  }
 }
 
 export function getSessionCols(sessionId: string): number {

@@ -104,6 +104,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   // Non-destructive refit (see the octoally:refit-terminal handler).
   const softRefitRef = useRef<(() => void) | null>(null);
   const isSuspendedRef = useRef(suspended);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const passiveResizeRef = useRef(passiveResize);
   passiveResizeRef.current = passiveResize;
   const hideCursorRef = useRef(hideCursor);
@@ -561,6 +563,13 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
               // Defer: term.resize relayouts on the next frame; measuring now
               // would scale against the old size.
               scheduleScale();
+              break;
+            case 'control-free':
+              // The controller left. A visible desktop view takes the session
+              // back, so it does not sit at the server's default size with
+              // nobody driving it. Hidden or suspended views leave it to the
+              // one on screen; claimControl is a no-op for browsers.
+              if (visibleRef.current && !isSuspendedRef.current) claimControlRef.current();
               break;
             case 'control-lost':
               // Another client took geometry control of this shared session.
