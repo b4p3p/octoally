@@ -23,7 +23,6 @@ interface ProjectViewProps {
   focusSessionId?: string | null;
   onFocusSessionHandled?: () => void;
   /** Report hidden (closed-tab) session IDs to parent */
-  onHiddenSessionsChange?: (sessionIds: string[]) => void;
   /** External request (tab context menu "Duplicate last session"): open the
       launcher with the TaskModal pre-filled, then call onLaunchPrefillHandled */
   launchPrefill?: { task?: string; model?: string; cliType?: 'claude' | 'codex' } | null;
@@ -106,7 +105,7 @@ const sidebarButtons = [
   { id: 'git' as const, icon: GitBranch, title: 'Source Control' },
 ] as const;
 
-export function ProjectView({ projectId, projectPath, projectName: _projectName, active = true, terminalsSuspended = false, focusSessionId, onFocusSessionHandled, onHiddenSessionsChange, launchPrefill, onLaunchPrefillHandled }: ProjectViewProps) {
+export function ProjectView({ projectId, projectPath, projectName: _projectName, active = true, terminalsSuspended = false, focusSessionId, onFocusSessionHandled, launchPrefill, onLaunchPrefillHandled }: ProjectViewProps) {
   const queryClient = useQueryClient();
 
   // Fetch project data for SessionLauncher
@@ -348,11 +347,6 @@ export function ProjectView({ projectId, projectPath, projectName: _projectName,
   const closedSessionIds = useRef(new Set<string>());
   // Counter to force re-render when closedSessionIds changes (refs don't trigger re-renders)
   const [closedIdsVersion, setClosedIdsVersion] = useState(0);
-
-  // Report hidden session IDs to parent (for Active Sessions filtering)
-  useEffect(() => {
-    onHiddenSessionsChange?.([...closedSessionIds.current]);
-  }, [closedIdsVersion, onHiddenSessionsChange]);
 
   // Sync terminal instances with server sessions (auto-detect running sessions)
   const syncedRef = useRef(false);

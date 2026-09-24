@@ -105,26 +105,6 @@ function Dashboard() {
     return () => uninstall();
   }, []);
 
-  // Track hidden session IDs reported by each ProjectView
-  const hiddenSessionIdsRef = useRef<Map<string, string[]>>(new Map());
-  const [hiddenSessionIds, setHiddenSessionIds] = useState<string[]>([]);
-  const handleHiddenSessionsChange = useCallback((projectId: string, sessionIds: string[]) => {
-    hiddenSessionIdsRef.current.set(projectId, sessionIds);
-    const all: string[] = [];
-    for (const ids of hiddenSessionIdsRef.current.values()) all.push(...ids);
-    setHiddenSessionIds(all);
-  }, []);
-  // Stable per-project callbacks to avoid inline arrow re-creation on every render
-  const hiddenSessionsCallbacksRef = useRef<Map<string, (ids: string[]) => void>>(new Map());
-  const getHiddenSessionsCallback = useCallback((projectId: string) => {
-    let cb = hiddenSessionsCallbacksRef.current.get(projectId);
-    if (!cb) {
-      cb = (ids: string[]) => handleHiddenSessionsChange(projectId, ids);
-      hiddenSessionsCallbacksRef.current.set(projectId, cb);
-    }
-    return cb;
-  }, [handleHiddenSessionsChange]);
-
   const queryClient = useQueryClient();
 
   const { data: projectsData } = useQuery({
@@ -732,8 +712,6 @@ function Dashboard() {
           <div className="absolute inset-0 z-20">
             <ActiveTerminals
               onBack={dismissActiveTerminals}
-              openProjectIds={projectTabs.map((t) => t.projectId)}
-              hiddenSessionIds={hiddenSessionIds}
               onGoToSession={(projectId, sessionId) => {
                 const tab = projectTabs.find((t) => t.projectId === projectId);
                 if (tab) {
@@ -786,7 +764,6 @@ function Dashboard() {
                   terminalsSuspended={showActiveTerminals}
                   focusSessionId={isActive ? focusSessionId : null}
                   onFocusSessionHandled={() => setFocusSessionId(null)}
-                  onHiddenSessionsChange={getHiddenSessionsCallback(tab.projectId)}
                   launchPrefill={launchPrefill?.projectId === tab.projectId ? launchPrefill : null}
                   onLaunchPrefillHandled={() => setLaunchPrefill(null)}
                 />

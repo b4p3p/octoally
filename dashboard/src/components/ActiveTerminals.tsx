@@ -11,8 +11,6 @@ import { modelBadgeLabel } from './ModelPicker';
 interface ActiveTerminalsProps {
   onBack: () => void;
   onGoToSession: (projectId: string, sessionId: string) => void;
-  openProjectIds?: string[];
-  hiddenSessionIds?: string[];
 }
 
 interface SessionGroup {
@@ -45,11 +43,10 @@ function loadLabels(): Record<string, string> {
   }
 }
 
-export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenSessionIds }: ActiveTerminalsProps) {
+export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState<ExpandedSession | null>(null);
   const [jumpOpen, setJumpOpen] = useState(false);
-  const [showAll, setShowAll] = useState(false);
   const [colsOpen, setColsOpen] = useState(false);
   const [rowsOpen, setRowsOpen] = useState(false);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
@@ -307,18 +304,12 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
     (s) => s.status === 'running' || s.status === 'detached' || s.status === 'pending'
   );
 
-  // Split into shown (open tab or plain terminal) vs hidden (tab not open or individually hidden)
-  const openSet = openProjectIds ? new Set(openProjectIds) : null;
-  const hiddenSet = hiddenSessionIds && hiddenSessionIds.length > 0 ? new Set(hiddenSessionIds) : null;
-  const normallyShown = activeSessions.filter((s) => {
-    // Exclude sessions from closed project tabs
-    if (openSet && s.project_id && !openSet.has(s.project_id)) return false;
-    // Exclude individually hidden session tabs
-    if (hiddenSet && hiddenSet.has(s.id)) return false;
-    return true;
-  });
-  const hiddenCount = activeSessions.length - normallyShown.length;
-  const shownSessions = showAll ? activeSessions : normallyShown;
+  // Every live session is on the grid. There used to be a filter hiding the
+  // ones whose project tab was closed (or whose sub-tab was closed inside the
+  // project view), behind a "Show All" button; a tab lost to anything, such as
+  // two app windows overwriting each other's saved tabs, made a console vanish
+  // for no visible reason. Hiding one is what "minimize to tray" is for.
+  const shownSessions = activeSessions;
 
   // Group by project
   const groupMap = new Map<string, SessionGroup>();
@@ -438,23 +429,6 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
           >
             {activeSessions.length}
           </span>
-          {hiddenCount > 0 && !showAll && (
-            <>
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded-full"
-                style={{ color: 'var(--text-secondary)', opacity: 0.7 }}
-              >
-                ({normallyShown.length} shown, {hiddenCount} hidden)
-              </span>
-              <button
-                onClick={() => setShowAll(true)}
-                className="text-[10px] font-medium hover:underline"
-                style={{ color: 'var(--accent)' }}
-              >
-                Show All
-              </button>
-            </>
-          )}
         </div>
 
         {/* Columns dropdown */}
