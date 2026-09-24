@@ -21,6 +21,7 @@ import { streamRoutes } from './routes/stream.js';
 import { projectRoutes, initProjects } from './routes/projects.js';
 import { terminalRoutes } from './routes/terminal.js';
 import { fileRoutes } from './routes/files.js';
+import { launchDetached } from './services/launch-gui.js';
 import { gitRoutes } from './routes/git.js';
 import { agentRoutes } from './routes/agent.js';
 import { settingsRoutes } from './routes/settings.js';
@@ -179,11 +180,15 @@ async function start() {
     if (!path || typeof path !== 'string') {
       return reply.status(400).send({ error: 'Invalid path' });
     }
-    const { spawn } = await import('child_process');
-    const isMac = process.platform === 'darwin';
-    // macOS: 'open' opens Finder; Linux: 'xdg-open' opens default file manager
-    const cmd = isMac ? 'open' : 'xdg-open';
-    spawn(cmd, [path], { detached: true, stdio: 'ignore' }).unref();
+    // macOS: 'open' opens Finder; Linux: 'xdg-open' opens default file manager.
+    // launchDetached supplies the display under the systemd unit and keeps the
+    // file manager out of the unit's control group.
+    const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
+    try {
+      await launchDetached(cmd, [path]);
+    } catch (err: any) {
+      return reply.status(500).send({ error: 'Failed to open file manager', details: err.message });
+    }
     return { ok: true };
   });
 

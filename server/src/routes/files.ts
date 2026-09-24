@@ -2,12 +2,30 @@ import { FastifyPluginAsync } from 'fastify';
 import { readdir, stat, readFile, writeFile, rm, rename, cp } from 'fs/promises';
 import { join, resolve, extname, dirname, basename } from 'path';
 import { exec } from 'child_process';
+import { accessSync, constants } from 'fs';
+import { delimiter } from 'path';
+import { launchDetached } from '../services/launch-gui.js';
 
 interface FileEntry {
   name: string;
   type: 'file' | 'directory';
   size: number;
   extension: string;
+}
+
+/** Look the VS Code launcher up on PATH, plus the places a systemd unit's
+ *  trimmed PATH leaves out (a snap or a /usr/local install). */
+function findVSCode(): string | null {
+  const dirs = [...(process.env.PATH || '').split(delimiter), '/usr/local/bin', '/snap/bin'];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const candidate = join(dir, process.platform === 'win32' ? 'code.cmd' : 'code');
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* not here */ }
+  }
+  return null;
 }
 
 export const fileRoutes: FastifyPluginAsync = async (app) => {
@@ -315,6 +333,12 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  // Whether the VS Code launcher can be found, so the UI can grey the action out
+  app.get('/open-vscode/available', async () => {
+    const bin = findVSCode();
+    return { available: !!bin, path: bin };
+  });
+
   // Open VS Code at a given path
   app.post<{
     Body: { path: string };
@@ -323,16 +347,20 @@ export const fileRoutes: FastifyPluginAsync = async (app) => {
     if (!path) return reply.status(400).send({ error: 'path is required' });
 
     const resolved = resolve(path);
+    try {
+      await stat(resolved);
+    } catch {
+      return reply.status(400).send({ error: 'Path does not exist', path: resolved });
+    }
 
-    return new Promise((resolvePromise) => {
-      exec(`code "${resolved}"`, (err) => {
-        if (err) {
-          reply.status(500).send({ error: 'Failed to open VS Code', details: err.message });
-        } else {
-          reply.send({ ok: true, path: resolved });
-        }
-        resolvePromise(undefined);
-      });
-    });
+    const bin = findVSCode();
+    if (!bin) return reply.status(404).send({ error: 'VS Code not found on PATH' });
+
+    try {
+      await launchDetached(bin, [resolved]);
+      return { ok: true, path: resolved };
+    } catch (err: any) {
+      return reply.status(500).send({ error: 'Failed to open VS Code', details: err.message });
+    }
   });
 };
