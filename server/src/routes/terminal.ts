@@ -175,6 +175,34 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
 
     // Both passive and active paths need async reconnect (worker fork),
     // so wrap in an async IIFE to handle awaiting properly.
+    //
+    // The message listener goes on NOW, not after the await: a socket that
+    // arrives after a server restart finds its session detached, and while
+    // reconnectSession() forks the worker the client has already sent its
+    // claim-control (Terminal.tsx sends it in onopen). ws drops events nobody
+    // listens to, so the claim used to vanish: no controller, the PTY stuck
+    // at DEFAULT_GEOMETRY, and every resize from the client ignored as coming
+    // from a viewer, until the next reconnect. Messages that arrive before
+    // the attach are held and replayed once it succeeds.
+    let live = false;
+    const early: Array<Buffer | string> = [];
+    const onRaw = (raw: Buffer | string) => {
+      try {
+        handleLiveMessage(sessionId, socket, JSON.parse(raw.toString()));
+      } catch {
+        // Passive views only ever speak JSON; an active view's raw text is input.
+        if (!isPassive) writeToSession(sessionId, raw.toString());
+      }
+    };
+    socket.on('message', (raw: Buffer | string) => {
+      if (live) onRaw(raw);
+      else early.push(raw);
+    });
+    const goLive = () => {
+      live = true;
+      for (const raw of early.splice(0)) onRaw(raw);
+    };
+
     (async () => {
       if (isPassive) {
         let attached = attachTerminal(sessionId, socket);
@@ -196,14 +224,9 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
         // the shared PTY *unless* they explicitly claim control (e.g. the user
         // zooms a grid card): claim-control lets the program reflow at the
         // viewer's size; without it, passive views still leave geometry alone.
-        socket.on('message', (raw: Buffer | string) => {
-          try {
-            const msg = JSON.parse(raw.toString());
-            handleLiveMessage(sessionId, socket, msg);
-          } catch { /* ignore */ }
-        });
         sendGeometry(sessionId, socket);
         socket.send(JSON.stringify({ type: 'connected', sessionId }));
+        goLive();
         return;
       }
 
@@ -223,18 +246,9 @@ export const terminalRoutes: FastifyPluginAsync = async (app) => {
         return;
       }
 
-      // Handle incoming messages from the browser terminal
-      socket.on('message', (raw: Buffer | string) => {
-        try {
-          const msg = JSON.parse(raw.toString());
-          handleLiveMessage(sessionId, socket, msg);
-        } catch {
-          writeToSession(sessionId, raw.toString());
-        }
-      });
-
       sendGeometry(sessionId, socket);
       socket.send(JSON.stringify({ type: 'connected', sessionId }));
+      goLive();
     })().catch((err) => {
       console.error(`[WS] Error in terminal handler for ${sessionId}:`, err);
       try {

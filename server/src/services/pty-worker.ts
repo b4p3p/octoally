@@ -783,6 +783,7 @@ async function handleSpawn(msg: SpawnMessage): Promise<void> {
     }
 
     wireOutput();
+    applyPendingSize();
     send({ type: 'ready', pid: ptyProcess.pid });
   } catch (err: any) {
     send({ type: 'error', message: `Spawn failed: ${err.message}` });
@@ -834,6 +835,7 @@ async function handleReconnect(msg: ReconnectMessage): Promise<void> {
     }
 
     wireOutput();
+    applyPendingSize();
     console.log(`[PTY-WORKER] ${msg.sessionId}: total_reconnect=${Date.now()-t0}ms`);
     send({ type: 'ready', pid: ptyProcess.pid, tmux: hasTmuxSession });
   } catch (err: any) {
@@ -920,8 +922,26 @@ function handleInput(data: string, isBracketedPaste = false): void {
   }
 }
 
+/** A resize that arrived before the PTY existed. The parent does not wait for
+ *  'ready' after a spawn or a reconnect, so the client's claim-control lands
+ *  here while tmux is still being created or attached. Dropping it left the
+ *  parent believing the claimed size was applied while tmux stayed at the
+ *  spawn size, and every client rendered against the wrong geometry until
+ *  something resized again. */
+let pendingSize: { cols: number; rows: number } | null = null;
+
+function applyPendingSize(): void {
+  if (!ptyProcess || !pendingSize) return;
+  const { cols, rows } = pendingSize;
+  pendingSize = null;
+  if (ptyProcess.cols !== cols || ptyProcess.rows !== rows) ptyProcess.resize(cols, rows);
+}
+
 function handleResize(cols: number, rows: number): void {
-  if (!ptyProcess) return;
+  if (!ptyProcess) {
+    pendingSize = { cols, rows };
+    return;
+  }
   ptyProcess.resize(cols, rows);
 }
 
