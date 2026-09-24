@@ -253,19 +253,9 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
           onClick: () => { onGoToSession(projectId, session.id); setExpanded(null); },
         });
       }
-      items.push({
-        label: 'Minimize back to grid',
-        icon: <Minimize2 className="w-3 h-3" />,
-        onClick: () => { setFocusedSessionId(session.id); setExpanded(null); },
-      });
     } else {
       items.push(
         { label: 'Minimize to tray', icon: <Minus className="w-3 h-3" />, onClick: () => minimize(session.id) },
-        {
-          label: 'Expand terminal',
-          icon: <Maximize2 className="w-3 h-3" />,
-          onClick: () => { setFocusedSessionId(session.id); setExpanded(card); },
-        },
       );
       if (projectId) {
         items.push({
@@ -773,6 +763,17 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                     </span>
                   )}
                   <button
+                    onClick={() => {
+                      setFocusedSessionId(session.id);
+                      setExpanded({ session, groupLabel, projectId });
+                    }}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
+                    style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+                    title="Expand terminal"
+                  >
+                    <Maximize2 className="w-2.5 h-2.5" />
+                  </button>
+                  <button
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={(e) => toggleCardMenu(e, { session, groupLabel, projectId }, false)}
                     className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
@@ -872,6 +873,17 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
               </span>
               {renderTitle(expanded.session, 'text-xs ml-2 truncate min-w-0')}
               <div className="flex items-center gap-2 ml-auto shrink-0">
+                <button
+                  onClick={() => {
+                    setFocusedSessionId(expanded.session.id);
+                    setExpanded(null);
+                  }}
+                  className="flex items-center justify-center w-6 h-6 rounded shrink-0 transition-colors hover:opacity-100 opacity-70"
+                  style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+                  title="Minimize back to grid"
+                >
+                  <Minimize2 className="w-3 h-3" />
+                </button>
                 <button
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => toggleCardMenu(e, expanded, true)}
