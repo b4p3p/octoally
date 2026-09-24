@@ -60,6 +60,45 @@ interface TerminalProps {
   onPopOut?: () => void;
 }
 
+/** xterm pauses its renderer while an IntersectionObserver reports the
+ *  terminal as hidden, and resumes only when that observer reports it visible
+ *  again. When the second report never comes (seen on the Active Sessions
+ *  grid, on a card created while the overlay was switching), the terminal
+ *  keeps taking output into its buffer and never paints it: input reaches the
+ *  session, the refresh button reaches the server, and the screen stays frozen
+ *  on an old frame until the card is expanded, which hides and re-shows it.
+ *  If the renderer is paused while the element is plainly on screen, hand it
+ *  the "visible" report it missed. Returns true if it had to. */
+interface XTermRenderServiceInternals {
+  _isPaused?: boolean;
+  _handleIntersectionChange?: (entry: Partial<IntersectionObserverEntry>) => void;
+}
+function renderServiceOf(term: XTerm): XTermRenderServiceInternals | undefined {
+  // Private xterm internals, guarded: if a release renames them this is a no-op.
+  return (term as unknown as { _core?: { _renderService?: XTermRenderServiceInternals } })._core?._renderService;
+}
+
+function wakeStalledRenderer(term: XTerm): boolean {
+  const rs = renderServiceOf(term);
+  if (!rs?._isPaused || typeof rs._handleIntersectionChange !== 'function') return false;
+  const el = term.element;
+  if (!el || document.visibilityState !== 'visible') return false;
+  const r = el.getBoundingClientRect();
+  const onScreen = r.width > 0 && r.height > 0
+    && r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+  if (!onScreen) return false;
+  rs._handleIntersectionChange({ isIntersecting: true, intersectionRatio: 1 });
+  return true;
+}
+
+/** Live terminals, for diagnosing a frozen one from the DevTools console:
+ *  `octoallyTerminals()` lists every mounted xterm with its session, socket
+ *  state, geometry, whether xterm's renderer is paused, and when output last
+ *  arrived and was last written. */
+const liveTerminals = new Map<number, () => Record<string, unknown>>();
+let nextTerminalId = 1;
+(window as unknown as { octoallyTerminals: () => unknown[] }).octoallyTerminals = () => [...liveTerminals.values()].map((f) => f());
+
 export function Terminal({ sessionId, visible = true, suspended = false, passiveResize = false, isController = true, hideCursor = false, cliType, onExit, onReconnect, onPopOut }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -150,6 +189,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   const hardRefresh = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
+    // A frozen screen is often just a paused renderer: wake it before the
+    // capture below is written, or that capture is never painted either.
+    wakeStalledRenderer(term);
     const fit = fitRef.current;
     const w = wsRef.current;
     // Only the controller owns the geometry; a viewer fitting here would drift
@@ -331,14 +373,36 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     let pendingData = '';
     let rafId: number | null = null;
 
+    let lastOutputAt = 0;
+    let lastWriteAt = 0;
+    let rendererWakes = 0;
     function flushWrite() {
       rafId = null;
       if (pendingData) {
         const data = pendingData;
         pendingData = '';
         term.write(data);
+        lastWriteAt = Date.now();
       }
+      // Cheap unless the renderer is paused: only then does it measure.
+      if (wakeStalledRenderer(term)) rendererWakes++;
     }
+
+    const terminalId = nextTerminalId++;
+    liveTerminals.set(terminalId, () => ({
+      sessionId,
+      ws: ['connecting', 'open', 'closing', 'closed'][wsRef.current?.readyState ?? 3],
+      controller: isControllerRef.current,
+      cols: term.cols,
+      rows: term.rows,
+      rendererPaused: !!renderServiceOf(term)?._isPaused,
+      rendererWakes,
+      pendingBytes: pendingData.length,
+      writeScheduled: rafId !== null,
+      lastOutput: lastOutputAt ? new Date(lastOutputAt).toLocaleTimeString() : null,
+      lastWrite: lastWriteAt ? new Date(lastWriteAt).toLocaleTimeString() : null,
+      onScreen: (() => { const r = term.element?.getBoundingClientRect(); return r ? `${Math.round(r.width)}x${Math.round(r.height)}@${Math.round(r.left)},${Math.round(r.top)}` : null; })(),
+    }));
 
     // Send user input to server
     // Filter out xterm.js focus reporting sequences (\x1b[I = focus in, \x1b[O = focus out)
@@ -533,6 +597,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
           switch (msg.type) {
             case 'output':
               reconnectAttempts = 0;
+              lastOutputAt = Date.now();
               // Defense-in-depth: strip focus reporting enable/disable sequences
               // so xterm.js never enters sendFocusMode (which causes focus/blur
               // events to be sent as input, corrupting Codex TUI rendering)
@@ -748,6 +813,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       xtermResizeObserver?.disconnect();
       pasteTarget.removeEventListener('paste', pasteHandler, { capture: true } as EventListenerOptions);
       wsRef.current?.close();
+      liveTerminals.delete(terminalId);
       term.dispose();
     };
   }, [sessionId, onExit]);
