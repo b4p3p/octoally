@@ -127,6 +127,8 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ path, content }),
       }),
+    vscodeAvailable: () =>
+      fetchJSON<{ available: boolean; path: string | null }>('/open-vscode/available'),
     openVSCode: (path: string) =>
       fetchJSON<{ ok: boolean }>('/open-vscode', {
         method: 'POST',

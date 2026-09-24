@@ -3,7 +3,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import type { Session, Project } from '../lib/api';
 import { Terminal } from './Terminal';
-import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Rows3, Zap, Bot, TerminalSquare, Minus, Pencil } from 'lucide-react';
+import { Monitor, ArrowLeft, ExternalLink, Minimize2, Maximize2, ChevronDown, X, Columns3, Rows3, Zap, Bot, TerminalSquare, Minus, Pencil, Code2, MoreHorizontal, FolderOpen } from 'lucide-react';
+import { ContextMenu, type ContextMenuItem, type ContextMenuState } from './ContextMenu';
 import { ClaudeIcon, CodexIcon } from './CliIcons';
 import { modelBadgeLabel } from './ModelPicker';
 
@@ -219,6 +220,95 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
   const sessions = sessionsData?.sessions || [];
   const projects = projectsData?.projects || [];
   const projectMap = new Map<string, Project>(projects.map((p) => [p.id, p]));
+
+  // The "more" menu on a card header (and on the expanded modal's header):
+  // the header's own actions minus Kill, plus Open in VS Code.
+  const [cardMenu, setCardMenu] = useState<(ContextMenuState & { owner: string }) | null>(null);
+  const { data: vscodeData } = useQuery({
+    queryKey: ['vscode-available'],
+    queryFn: () => api.files.vscodeAvailable(),
+    staleTime: Infinity,
+  });
+
+  function toggleCardMenu(e: React.MouseEvent<HTMLElement>, card: ExpandedSession, inModal: boolean) {
+    e.stopPropagation();
+    // A second click on the same button closes it; another card's button
+    // moves the menu over there.
+    const owner = `${inModal ? 'modal' : 'grid'}:${card.session.id}`;
+    if (cardMenu?.owner === owner) {
+      setCardMenu(null);
+      return;
+    }
+    const anchor = e.currentTarget.getBoundingClientRect();
+    const { session, projectId } = card;
+    const projectPath = projectId ? projectMap.get(projectId)?.path : undefined;
+    const items: ContextMenuItem[] = [
+      { label: 'Rename', icon: <Pencil className="w-3 h-3" />, onClick: () => startRename(session.id) },
+    ];
+    if (inModal) {
+      if (projectId) {
+        items.push({
+          label: 'Open full session view',
+          icon: <ExternalLink className="w-3 h-3" />,
+          onClick: () => { onGoToSession(projectId, session.id); setExpanded(null); },
+        });
+      }
+      items.push({
+        label: 'Minimize back to grid',
+        icon: <Minimize2 className="w-3 h-3" />,
+        onClick: () => { setFocusedSessionId(session.id); setExpanded(null); },
+      });
+    } else {
+      items.push(
+        { label: 'Minimize to tray', icon: <Minus className="w-3 h-3" />, onClick: () => minimize(session.id) },
+        {
+          label: 'Expand terminal',
+          icon: <Maximize2 className="w-3 h-3" />,
+          onClick: () => { setFocusedSessionId(session.id); setExpanded(card); },
+        },
+      );
+      if (projectId) {
+        items.push({
+          label: 'Open full session view',
+          icon: <ExternalLink className="w-3 h-3" />,
+          onClick: () => onGoToSession(projectId, session.id),
+        });
+      }
+    }
+    const vscodeLabel = !vscodeData?.available
+      ? 'Open in VS Code (not found)'
+      : !projectPath
+        ? 'Open in VS Code (no project folder)'
+        : 'Open in VS Code';
+    items.push(
+      { kind: 'separator' },
+      {
+        label: projectPath ? 'Open in file manager' : 'Open in file manager (no project folder)',
+        icon: <FolderOpen className="w-3 h-3" />,
+        disabled: !projectPath,
+        onClick: () => {
+          if (!projectPath) return;
+          api.openFolder(projectPath).catch((err) => {
+            console.error('Failed to open file manager:', err);
+          });
+        },
+      },
+      {
+        label: vscodeLabel,
+        icon: <Code2 className="w-3 h-3" />,
+        disabled: !vscodeData?.available || !projectPath,
+        onClick: () => {
+          if (!projectPath) return;
+          api.files.openVSCode(projectPath).catch((err) => {
+            console.error('Failed to open VS Code:', err);
+          });
+        },
+      },
+    );
+    // Under the button, right-aligned to it; ContextMenu pulls it back inside
+    // the viewport if it would overflow.
+    setCardMenu({ x: anchor.right - 220, y: anchor.bottom + 4, items, owner });
+  }
 
   // 'pending' included: a freshly-created session only spawns its PTY when
   // a mounted Terminal attaches and sends the first resize (lazy spawn) —
@@ -521,12 +611,6 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                       <span className="truncate min-w-0 flex-1" style={{ color: 'var(--text-secondary)' }}>
                         {session.task || 'Terminal'}
                       </span>
-                      <div
-                        className="w-1.5 h-1.5 rounded-full shrink-0"
-                        style={{
-                          background: session.status === 'running' ? 'var(--success)' : 'var(--warning)',
-                        }}
-                      />
                     </button>
                   ))}
                 </div>
@@ -585,12 +669,6 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                     {labels[session.id] || session.task || 'Terminal'}
                   </span>
                 </button>
-                <div
-                  className="w-1.5 h-1.5 rounded-full shrink-0"
-                  style={{
-                    background: session.status === 'running' ? 'var(--success)' : 'var(--warning)',
-                  }}
-                />
                 <button
                   onClick={() => restore(session.id)}
                   className="flex items-center justify-center w-5 h-5 rounded transition-colors hover:opacity-100 opacity-70"
@@ -694,49 +772,15 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                       {modelBadgeLabel((session as any).model)}
                     </span>
                   )}
-                  <div
-                    className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{
-                      background: session.status === 'running' ? 'var(--success)' : 'var(--warning)',
-                    }}
-                  />
                   <button
-                    onClick={() => startRename(session.id)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => toggleCardMenu(e, { session, groupLabel, projectId }, false)}
                     className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
                     style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
-                    title="Rename session"
+                    title="More actions"
                   >
-                    <Pencil className="w-2.5 h-2.5" />
+                    <MoreHorizontal className="w-2.5 h-2.5" />
                   </button>
-                  <button
-                    onClick={() => minimize(session.id)}
-                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
-                    style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
-                    title="Minimize to tray (keeps session alive)"
-                  >
-                    <Minus className="w-2.5 h-2.5" />
-                  </button>
-                  <button
-                    onClick={() => {
-                      setFocusedSessionId(session.id);
-                      setExpanded({ session, groupLabel, projectId });
-                    }}
-                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
-                    style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
-                    title="Expand terminal"
-                  >
-                    <Maximize2 className="w-2.5 h-2.5" />
-                  </button>
-                  {projectId && (
-                    <button
-                      onClick={() => onGoToSession(projectId, session.id)}
-                      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-100 opacity-70"
-                      style={{ background: 'var(--accent)', color: 'white' }}
-                      title="Open full session view"
-                    >
-                      <ExternalLink className="w-2.5 h-2.5" />
-                    </button>
-                  )}
                   <button
                     onClick={() => {
                       api.sessions.kill(session.id)
@@ -827,41 +871,15 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
                 {expanded.groupLabel}
               </span>
               {renderTitle(expanded.session, 'text-xs ml-2 truncate min-w-0')}
-              <button
-                onClick={() => startRename(expanded.session.id)}
-                className="flex items-center justify-center w-6 h-6 rounded shrink-0 transition-colors hover:opacity-100 opacity-70"
-                style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
-                title="Rename session"
-              >
-                <Pencil className="w-3 h-3" />
-              </button>
               <div className="flex items-center gap-2 ml-auto shrink-0">
-                {expanded.projectId && (
-                  <button
-                    onClick={() => {
-                      onGoToSession(expanded.projectId!, expanded.session.id);
-                      setExpanded(null);
-                    }}
-                    className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors"
-                    style={{ background: 'var(--accent)', color: 'white' }}
-                    title="Open full session view"
-                  >
-                    <ExternalLink className="w-3 h-3 shrink-0" />
-                    <span>Open Session</span>
-                  </button>
-                )}
                 <button
-                  onClick={() => {
-                    const sid = expanded.session.id;
-                    setFocusedSessionId(sid);
-                    setExpanded(null);
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap transition-colors"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => toggleCardMenu(e, expanded, true)}
+                  className="flex items-center justify-center w-6 h-6 rounded shrink-0 transition-colors hover:opacity-100 opacity-70"
                   style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
-                  title="Minimize back to grid"
+                  title="More actions"
                 >
-                  <Minimize2 className="w-3 h-3 shrink-0" />
-                  <span>Minimize</span>
+                  <MoreHorizontal className="w-3 h-3" />
                 </button>
               </div>
             </div>
@@ -871,6 +889,15 @@ export function ActiveTerminals({ onBack, onGoToSession, openProjectIds, hiddenS
             </div>
           </div>
         </div>
+      )}
+
+      {cardMenu && (
+        <ContextMenu
+          x={cardMenu.x}
+          y={cardMenu.y}
+          items={cardMenu.items}
+          onClose={() => setCardMenu(null)}
+        />
       )}
     </div>
   );
