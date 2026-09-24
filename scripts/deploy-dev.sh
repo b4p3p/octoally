@@ -33,27 +33,46 @@ bash "$SRC_DIR/scripts/ensure-runtime-deps.sh"
 #    group, which takes tmux, the Claude processes and their MCP servers with
 #    it. A graceful stop lets the server run killAllSessions(), which kills the
 #    PTY workers and deliberately leaves tmux alive for the reconnect.
-log_info "Stopping server..."
-SERVICE_ACTIVE=false
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet octoally; then
-  SERVICE_ACTIVE=true
-  log_info "The systemd unit owns the server: stopping it there (needs sudo)."
-  sudo systemctl stop octoally
-else
-  "$INSTALL_DIR/bin/octoally" stop >/dev/null 2>&1 || true
+#
+#    The unit is looked for as INSTALLED, not as active. A unit left in
+#    'failed' (typically because someone else took the port while it was
+#    down, e.g. an older desktop app's watchdog during the previous deploy)
+#    is still the one that must own the server afterwards: treating it as
+#    absent restarted the server by hand and made the problem permanent.
+SERVICE_INSTALLED=false
+if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/octoally.service ]; then
+  SERVICE_INSTALLED=true
 fi
 
-# Wait for the port to come free; force only what refuses to let go.
-for _ in $(seq 1 10); do
-  ss -ltn 2>/dev/null | grep -q ":42010" || break
-  sleep 1
-done
-if ss -ltn 2>/dev/null | grep -q ":42010"; then
+# Empty when the port is free. `|| true` matters: under pipefail a grep with
+# no match fails the pipeline, and `pid=$(port_pid)` would end the script.
+port_pid() {
+  ss -ltnpH "sport = :42010" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2 || true
+}
+
+# Free port 42010 from whatever server holds it: SIGINT first (the path that
+# keeps tmux alive), force only what refuses to let go.
+free_port() {
+  "$INSTALL_DIR/bin/octoally" stop >/dev/null 2>&1 || true
+  local pid
+  pid=$(port_pid)
+  [ -n "$pid" ] && kill -INT "$pid" 2>/dev/null
+  for _ in $(seq 1 10); do
+    [ -z "$(port_pid)" ] && return 0
+    sleep 1
+  done
   log_error "Port 42010 still bound after a graceful stop: forcing it."
   log_error "Sessions open right now may not survive this."
   fuser -k 42010/tcp >/dev/null 2>&1 || true
   sleep 1
+}
+
+log_info "Stopping server..."
+if [ "$SERVICE_INSTALLED" = true ]; then
+  log_info "The systemd unit owns the server: stopping it there (needs sudo)."
+  sudo systemctl stop octoally
 fi
+free_port
 
 # 2. Install dependencies & build all
 log_info "Installing dependencies..."
@@ -111,8 +130,30 @@ fi
 #    restart-loops on EADDRINUSE, burns through StartLimitBurst and lands in
 #    'failed', leaving the install with nobody to bring it back up.
 log_info "Restarting server..."
-if [ "$SERVICE_ACTIVE" = true ]; then
+if [ "$SERVICE_INSTALLED" = true ]; then
+  # The build took a while: whatever grabbed the port meanwhile goes first,
+  # then the unit comes back with a clean slate.
+  [ -n "$(port_pid)" ] && free_port
+  sudo systemctl reset-failed octoally 2>/dev/null || true
   sudo systemctl start octoally
+  # Check it is really the unit answering, not someone else's server.
+  for _ in $(seq 1 15); do
+    [ -n "$(port_pid)" ] && break
+    sleep 1
+  done
+  OWNER_PID=$(port_pid)
+  if [ -z "$OWNER_PID" ]; then
+    log_error "Nothing is listening on 42010. Check: systemctl status octoally"
+    exit 1
+  fi
+  # The unit's processes live in its control group, however deep the
+  # launcher nests the node process.
+  if ! grep -q '/octoally.service$' "/proc/$OWNER_PID/cgroup" 2>/dev/null; then
+    log_error "Port 42010 is held by PID $OWNER_PID, which is not the systemd unit."
+    log_error "An old desktop app probably restarted its own server: close it and run the deploy again."
+    exit 1
+  fi
+  log_ok "Server running under the systemd unit (PID $OWNER_PID)"
 else
   "$INSTALL_DIR/bin/octoally" start 2>/dev/null || true
 fi

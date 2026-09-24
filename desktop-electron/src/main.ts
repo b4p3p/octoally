@@ -86,6 +86,24 @@ function startupFailurePage(detail: string): string {
   return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
 }
 
+/** What the failure page says when the server is down and a system service
+ *  (systemd unit / launchd agent) is installed.
+ *
+ *  In that case the app never starts a server of its own, at launch or from
+ *  the watchdog. It used to, and a deploy is exactly when it went wrong: the
+ *  deploy stops the unit, the watchdog notices within 3s and starts a server
+ *  from the half-copied install, and when the unit comes back the port is
+ *  taken. systemd restart-loops on EADDRINUSE, gives up in 'failed', and the
+ *  machine is left on a stale server that belongs to the desktop app's scope. */
+function serviceDownDetail(): string {
+  const how = process.platform === 'darwin'
+    ? 'launchctl list | grep octoally'
+    : 'systemctl status octoally\nsudo systemctl start octoally';
+  return 'The OctoAlly system service is installed but is not answering. '
+    + 'The desktop app leaves starting the server to the service, so that it '
+    + 'never takes the port away from it.\n\n' + how;
+}
+
 function loadDashboard() {
   showingFailurePage = false;
   mainWindow?.loadURL(dashboardUrl());
@@ -308,10 +326,15 @@ app.whenReady().then(async () => {
   });
   registerSpeechHandlers();
 
-  // Start server if port 42010 is not reachable (regardless of PID file state)
+  // Start server if port 42010 is not reachable (regardless of PID file state),
+  // unless a system service owns it: see serviceDownDetail().
   let reachable = await isServerReachable();
   let startupError: string | undefined;
-  if (!reachable) {
+  if (!reachable && isServiceInstalled()) {
+    console.log('[OctoAlly] Server not reachable, waiting for the system service...');
+    reachable = await waitForServer(30000);
+    if (!reachable) startupError = serviceDownDetail();
+  } else if (!reachable) {
     console.log('[OctoAlly] Server not reachable, starting...');
     const started = await startServer(cliPath);
     if (started.ok) {
@@ -350,6 +373,17 @@ app.whenReady().then(async () => {
       return;
     }
     restarting = true;
+    if (isServiceInstalled()) {
+      // The service manager brings it back; all this side does is wait.
+      console.log('[OctoAlly] Server not reachable, waiting for the system service...');
+      if (await waitForServer(30000)) {
+        loadDashboard();
+      } else if (!showingFailurePage) {
+        showFailurePage(serviceDownDetail());
+      }
+      restarting = false;
+      return;
+    }
     console.log('[OctoAlly] Server not reachable, restarting...');
     const restarted = await startServer(cliPath);
     const ok = await waitForServer(15000);
