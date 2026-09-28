@@ -29,6 +29,7 @@ const COLUMNS_KEY = 'octoally-active-terminals-cols';
 const ROWS_KEY = 'octoally-active-terminals-rows';
 const MINIMIZED_KEY = 'octoally-active-terminals-minimized';
 const LABELS_KEY = 'octoally-active-terminals-labels';
+const ORDER_KEY = 'octoally-active-terminals-order';
 
 // Per-session custom names, stored client-side only (see the persistence note
 // where this is used). Keyed by session id → user-chosen label.
@@ -69,6 +70,19 @@ export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps)
       return new Set();
     }
   });
+  // Card order chosen by drag & drop, as session ids. Kept in localStorage so it
+  // survives a reload of the window; after a reboot the sessions are new, so the
+  // grid starts over from alphabetical.
+  const [cardOrder, setCardOrder] = useState<string[]>(() => {
+    try {
+      const arr = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]');
+      return Array.isArray(arr) ? (arr as string[]) : [];
+    } catch {
+      return [];
+    }
+  });
+  const draggingIdRef = useRef<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -335,6 +349,12 @@ export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps)
     }
   }
   allCards.sort((a, b) => a.groupLabel.localeCompare(b.groupLabel));
+  // Then the order set by dragging cards around. Sessions it doesn't know yet
+  // (opened after the last move) keep their alphabetical place at the end.
+  if (cardOrder.length > 0) {
+    const rank = new Map(cardOrder.map((id, i) => [id, i]));
+    allCards.sort((a, b) => (rank.get(a.session.id) ?? Infinity) - (rank.get(b.session.id) ?? Infinity));
+  }
 
   // Split into visible cards (rendered in grid) and minimized cards (rendered in tray).
   // Minimized cards keep their server-side PTY alive — we just unmount the Terminal,
@@ -402,6 +422,22 @@ export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps)
       }, 400);
     }
   }, []);
+
+  function dropCard(targetId: string) {
+    const draggedId = draggingIdRef.current;
+    draggingIdRef.current = null;
+    setDragOverId(null);
+    if (!draggedId || draggedId === targetId) return;
+    const ids = allCards.map((c) => c.session.id);
+    const from = ids.indexOf(draggedId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, draggedId);
+    // Only live ids are written, so closed sessions drop out on the next move.
+    setCardOrder(ids);
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify(ids)); } catch {}
+  }
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--bg-primary)' }}>
@@ -686,16 +722,48 @@ export function ActiveTerminals({ onBack, onGoToSession }: ActiveTerminalsProps)
                   if (el) cardRefs.current.set(session.id, el);
                   else cardRefs.current.delete(session.id);
                 }}
+                onDragOver={(e) => {
+                  if (!draggingIdRef.current) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  if (dragOverId !== session.id) setDragOverId(session.id);
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                    setDragOverId((cur) => (cur === session.id ? null : cur));
+                  }
+                }}
+                onDrop={(e) => {
+                  if (!draggingIdRef.current) return;
+                  e.preventDefault();
+                  dropCard(session.id);
+                }}
                 className="rounded-lg border flex flex-col overflow-hidden transition-all duration-200"
                 style={{
-                  borderColor: isFocused ? '#22c55e' : 'var(--border)',
+                  borderColor: dragOverId === session.id && draggingIdRef.current !== session.id
+                    ? 'var(--accent)'
+                    : isFocused ? '#22c55e' : 'var(--border)',
+                  opacity: draggingIdRef.current === session.id ? 0.5 : 1,
                   background: 'var(--bg-secondary)',
                   height: `${cardHeight + (mounted ? 1 : 0)}px`,
                 }}
               >
-                {/* Card header */}
+                {/* Card header — also the handle to drag the card to another place */}
                 <div
-                  className="flex items-center gap-1.5 px-2 h-[34px] border-b rounded-t-lg transition-colors duration-200 overflow-hidden"
+                  draggable={editingLabelId !== session.id}
+                  onDragStart={(e) => {
+                    draggingIdRef.current = session.id;
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', session.id);
+                    const card = cardRefs.current.get(session.id);
+                    if (card) e.dataTransfer.setDragImage(card, e.nativeEvent.offsetX, e.nativeEvent.offsetY);
+                  }}
+                  onDragEnd={() => {
+                    draggingIdRef.current = null;
+                    setDragOverId(null);
+                  }}
+                  title="Drag to reorder"
+                  className="flex items-center gap-1.5 px-2 h-[34px] border-b rounded-t-lg transition-colors duration-200 overflow-hidden cursor-grab active:cursor-grabbing"
                   style={{
                     borderColor: isFocused ? '#22c55e' : 'var(--border)',
                     background: isFocused ? '#22c55e30' : 'var(--bg-tertiary)',
