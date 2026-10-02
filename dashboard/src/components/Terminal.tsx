@@ -407,8 +407,27 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     // Send user input to server
     // Filter out xterm.js focus reporting sequences (\x1b[I = focus in, \x1b[O = focus out)
     // These get sent when terminal gains/loses focus and Claude Code's TUI interprets them as input
+    // Middle-button mouse reports are dropped too. On Linux a middle click already
+    // pastes the PRIMARY selection through the browser paste event above; when the
+    // app has enabled mouse tracking (Claude Code does) it would also get the click
+    // and paste the clipboard on its own, so the text landed twice.
+    const isMiddleButtonReport = (data: string): boolean => {
+      // SGR (1006): ESC [ < Cb ; x ; y M|m: low two bits 1 = middle, bit 64 = wheel
+      const sgr = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(data);
+      if (sgr) {
+        const cb = Number(sgr[1]);
+        return (cb & 3) === 1 && (cb & 64) === 0;
+      }
+      // Default/X10 encoding: ESC [ M Cb+32 x+32 y+32
+      if (data.length === 6 && data.startsWith('\x1b[M')) {
+        const cb = data.charCodeAt(3) - 32;
+        return (cb & 3) === 1 && (cb & 64) === 0;
+      }
+      return false;
+    };
     term.onData((data: string) => {
       if (data === '\x1b[I' || data === '\x1b[O') return;
+      if (isMiddleButtonReport(data)) return;
       const w = wsRef.current;
       if (w && w.readyState === WebSocket.OPEN) {
         w.send(JSON.stringify({ type: 'input', data }));
@@ -416,6 +435,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     });
 
     term.onBinary((data: string) => {
+      if (isMiddleButtonReport(data)) return;
       const w = wsRef.current;
       if (w && w.readyState === WebSocket.OPEN) {
         w.send(JSON.stringify({ type: 'input', data }));
