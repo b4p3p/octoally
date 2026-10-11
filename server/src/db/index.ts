@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { dirname, join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 import { config } from '../config.js';
 
 let db: Database.Database;
@@ -13,6 +13,8 @@ export function getDb(): Database.Database {
 }
 
 export function initDb(): void {
+  // DB_PATH can point anywhere (dev:isolated does), so its folder may not exist yet.
+  mkdirSync(dirname(config.dbPath), { recursive: true });
   db = new Database(config.dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
