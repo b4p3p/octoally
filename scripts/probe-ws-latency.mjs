@@ -3,7 +3,8 @@
  * probe-ws-latency.mjs — key-to-first-output latency through the real server.
  * Needs a running server (default :42020 = dev:isolated; BASE=http://host:port to override).
  * Creates a throwaway plain terminal in /tmp, attaches over WebSocket, sends 60 isolated
- * keys and a 200-key burst. Section 6.1 of ANALISI-2026-09-05 has the reference numbers.
+ * keys and a 200-key burst. Section 6.1 of
+ * docs/2026-09-05-terminal-lag-mint-comparison.md has the reference numbers.
  */
 // End-to-end over the real server: REST create -> WS attach -> isolated keys -> first 'output' frame.
 const BASE = process.env.BASE || 'http://localhost:42020';

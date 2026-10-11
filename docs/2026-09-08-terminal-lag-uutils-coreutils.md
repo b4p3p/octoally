@@ -4,17 +4,13 @@ Date: 2026-09-08
 Status: **cause found, fixed, verified in production on the affected machine.**
 Fixed in: `fix(terminal): copy pane output with dd, not cat`.
 
-Supersedes the diagnosis of two earlier documents in this folder (both in
-Italian): `ANALISI-2026-09-04-lag-terminale-wayland.md` and
-`ANALISI-2026-09-05-lag-terminale-confronto-mint.md`. Their measurements all
+Supersedes the diagnosis of two earlier documents in this folder:
+`2026-09-04-terminal-lag-kde-wayland.md` and
+`2026-09-05-terminal-lag-mint-comparison.md`. Their measurements all
 stand and are reused below. Their final conclusion does not: they closed on a
 cause that turned out to be a third of the problem, and archived the line of
 enquiry that led to the real one. Section 6 says exactly where and why, because
 that mistake is more instructive than the bug.
-
-This document is in English while its four predecessors are in Italian. The
-repository is public and `CLAUDE.md` asks for English in everything committed;
-the older ones are left as they are rather than retranslated.
 
 ## 0. In one paragraph
 
