@@ -9,8 +9,8 @@
 # app's port or database:
 #
 #   npm run dev:isolated
-#       server   -> http://localhost:42020   (DB: ~/.octoally/octoally-dev.db)
-#       dashboard-> http://localhost:42021   (proxies to the dev server)
+#       server   -> http://localhost:42030   (DB: ~/.octoally/octoally-dev.db)
+#       dashboard-> http://localhost:42031   (proxies to the dev server)
 #
 # Usage: bash scripts/dev-setup.sh   (or: npm run dev:setup)
 
@@ -36,8 +36,8 @@ echo ""
 echo -e "  ${BOLD}Start an isolated dev environment (never touches the installed app):${NC}"
 echo "    npm run dev:isolated"
 echo ""
-echo -e "    server    -> http://localhost:42020   (DB: ~/.octoally/octoally-dev.db)"
-echo -e "    dashboard -> http://localhost:42021"
+echo -e "    server    -> http://localhost:42030   (DB: ~/.octoally/octoally-dev.db)"
+echo -e "    dashboard -> http://localhost:42031"
 echo ""
 echo -e "  ${BOLD}Deploy from source to the local install:${NC}"
 echo "    npm run deploy"

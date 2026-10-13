@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * probe-ws-latency.mjs — key-to-first-output latency through the real server.
- * Needs a running server (default :42020 = dev:isolated; BASE=http://host:port to override).
+ * Needs a running server (default :42030 = dev:isolated; BASE=http://host:port to override).
  * Creates a throwaway plain terminal in /tmp, attaches over WebSocket, sends 60 isolated
  * keys and a 200-key burst. Section 6.1 of
  * docs/2026-09-05-terminal-lag-mint-comparison.md has the reference numbers.
  */
 // End-to-end over the real server: REST create -> WS attach -> isolated keys -> first 'output' frame.
-const BASE = process.env.BASE || 'http://localhost:42020';
+const BASE = process.env.BASE || 'http://localhost:42030';
 const r = await fetch(`${BASE}/api/sessions`, { method: 'POST', headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ project_path: '/tmp', task: 'Terminal', mode: 'terminal' }) });
 const { session } = await r.json();

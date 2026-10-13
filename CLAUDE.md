@@ -17,7 +17,7 @@ Monorepo: a headless engine plus web and desktop clients.
 ## Commands
 
 - **Dev (isolated — always test here):** `npm run dev:isolated`
-  → server on :42020, dashboard (Vite) on :42021, separate DB `~/.octoally/octoally-dev.db`,
+  → server on :42030, dashboard (Vite) on :42031, separate DB `~/.octoally/octoally-dev.db`,
   and its own tmux socket `octoally-dev` (`OCTOALLY_TMUX_SERVER`), so a dev instance can
   never create, resize or kill a session on the socket the installed server is using.
   Never test on the live install ("deploy and pray" has burned us repeatedly).
