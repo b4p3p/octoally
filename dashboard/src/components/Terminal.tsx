@@ -96,6 +96,11 @@ function wakeStalledRenderer(term: XTerm): boolean {
  *  state, geometry, whether xterm's renderer is paused, and when output last
  *  arrived and was last written. */
 const liveTerminals = new Map<number, () => Record<string, unknown>>();
+
+/** Write watchdog: seconds without an acknowledged write before the terminal is
+ *  rebuilt, and how many rebuilds a single terminal may do per minute. */
+const WRITE_STALL_TICKS = 3;
+const MAX_REBUILDS_PER_MINUTE = 3;
 let nextTerminalId = 1;
 (window as unknown as { octoallyTerminals: () => unknown[] }).octoallyTerminals = () => [...liveTerminals.values()].map((f) => f());
 
@@ -105,6 +110,10 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
   const wsRef = useRef<WebSocket | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
+  // Bumped to throw the xterm instance away and build a new one (see the write
+  // watchdog in the main effect).
+  const [rebuildCount, setRebuildCount] = useState(0);
+  const rebuildTimesRef = useRef<number[]>([]);
 
   // Read terminal font size from settings
   const { data: settingsData } = useQuery({
@@ -376,17 +385,54 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
     let lastOutputAt = 0;
     let lastWriteAt = 0;
     let rendererWakes = 0;
+    let unackedWrites = 0;
+    let ackedWrites = 0;
     function flushWrite() {
       rafId = null;
       if (pendingData) {
         const data = pendingData;
         pendingData = '';
-        term.write(data);
+        unackedWrites++;
+        term.write(data, () => { unackedWrites--; ackedWrites++; });
         lastWriteAt = Date.now();
       }
       // Cheap unless the renderer is paused: only then does it measure.
       if (wakeStalledRenderer(term)) rendererWakes++;
     }
+
+    // Write watchdog. When xterm's parser throws on a chunk (seen in the field:
+    // "Cannot read properties of undefined (reading 'replaceCells')" from
+    // eraseInLine), its write queue stops for good: the failed chunk is never
+    // skipped, nothing reschedules the queue, and every later write (the
+    // refresh capture and the reconnect replay included) piles up behind it
+    // unparsed. term.reset() does not clear that queue, so the card goes black
+    // and stays black. The instance cannot be repaired from outside: build a
+    // new one, and let the reconnect replay fill it.
+    //
+    // Three ticks in a row with writes waiting and none acknowledged is the
+    // signal. A hidden window is skipped: its timers are throttled, so a slow
+    // queue there is not a dead one.
+    let seenAcked = 0;
+    let stalledTicks = 0;
+    const writeWatchdog = setInterval(() => {
+      if (unackedWrites === 0 || ackedWrites !== seenAcked || document.visibilityState !== 'visible') {
+        seenAcked = ackedWrites;
+        stalledTicks = 0;
+        return;
+      }
+      if (++stalledTicks < WRITE_STALL_TICKS) return;
+      stalledTicks = 0;
+      const now = Date.now();
+      const recent = rebuildTimesRef.current.filter((at) => now - at < 60_000);
+      if (recent.length >= MAX_REBUILDS_PER_MINUTE) {
+        // The replay itself keeps killing the parser: rebuilding again would loop.
+        rebuildTimesRef.current = recent;
+        return;
+      }
+      rebuildTimesRef.current = [...recent, now];
+      console.warn(`[terminal] ${sessionId}: xterm stopped parsing (${unackedWrites} writes pending), rebuilding the terminal`);
+      setRebuildCount((n) => n + 1);
+    }, 1000);
 
     const terminalId = nextTerminalId++;
     liveTerminals.set(terminalId, () => ({
@@ -397,6 +443,8 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       rows: term.rows,
       rendererPaused: !!renderServiceOf(term)?._isPaused,
       rendererWakes,
+      unackedWrites,
+      rebuilds: rebuildTimesRef.current.length,
       pendingBytes: pendingData.length,
       writeScheduled: rafId !== null,
       lastOutput: lastOutputAt ? new Date(lastOutputAt).toLocaleTimeString() : null,
@@ -671,7 +719,9 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       };
 
       ws.onclose = () => {
-        setConnected(false);
+        // A socket that was replaced (reconnect, terminal rebuild) closes after
+        // its successor is already in place: that one owns `connected` now.
+        if (wsRef.current === ws || wsRef.current === null) setConnected(false);
         if (suspendedClose) {
           suspendedClose = false;
           return;
@@ -826,6 +876,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       disconnectFnRef.current = null;
       softRefitRef.current = null;
       if (rafId !== null) cancelAnimationFrame(rafId);
+      clearInterval(writeWatchdog);
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       if (resizeTimer) clearTimeout(resizeTimer);
       if (scaleRaf !== null) cancelAnimationFrame(scaleRaf);
@@ -836,7 +887,7 @@ export function Terminal({ sessionId, visible = true, suspended = false, passive
       liveTerminals.delete(terminalId);
       term.dispose();
     };
-  }, [sessionId, onExit]);
+  }, [sessionId, onExit, rebuildCount]);
 
   // Claim geometry control for this client (a full/expanded view that "wants
   // control"). The server makes us the sole controller and demotes any previous
